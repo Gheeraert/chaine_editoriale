@@ -70,6 +70,20 @@ def build_publication_manifest(
     contrats distincts d'Impressions pour le HTML et pour LaTEI/PDF (voir
     ``publier.prepare_media_layout_for_impressions``). Omis lorsqu'il n'y a
     pas de media, pour rester retrocompatible avec les manifestes existants.
+
+    Cles attendues (toutes optionnelles, ``None`` si non applicable) :
+
+    - ``source_media_directory`` : medias extraits par Mini-Metopes
+      (``workspace/source/media``) ;
+    - ``html_assets_source_directory`` : repertoire prepare dans le
+      workspace et transmis a ``BuildConfig.assets_dir``
+      (``workspace/impressions-assets/images/media``) ;
+    - ``html_output_directory`` : repertoire final effectivement lu par le
+      site publie, connu seulement apres l'execution de ``SiteBuilder``
+      (``output/assets/images/media``) ;
+    - ``latei_source_directory`` : repertoire de resolution initiale utilise
+      par l'empaquetage LaTEI, distinct des deux precedents
+      (``output/media``).
     """
 
     def rel(path: Path | None) -> str | None:
