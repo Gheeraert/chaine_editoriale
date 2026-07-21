@@ -175,9 +175,23 @@ def _require_str_field(data: dict[str, object], field_name: str, issues: list[Co
 
 
 def write_config(config: ChaineConfig, path: Path | None = None) -> Path:
-    """Ecrire config_chaine.json de maniere UTF-8, atomique et deterministe."""
+    """Ecrire config_chaine.json de maniere UTF-8, atomique et deterministe.
+
+    Toute erreur systeme (creation du dossier parent, fichier temporaire,
+    ecriture, remplacement atomique, nettoyage) est convertie en
+    ``ConfigurationError`` avec la cause d'origine et le chemin concerne ;
+    aucune configuration existante n'est ecrasee en cas d'echec.
+    """
+    from .erreurs import ConfigurationError
+
     resolved_path = path if path is not None else default_config_path()
-    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise ConfigurationError(
+            f"impossible de creer le dossier de configuration : {resolved_path.parent}"
+        ) from error
+
     data = {
         "schema": CONFIG_SCHEMA_NAME,
         "schema_version": CONFIG_SCHEMA_VERSION,
@@ -200,9 +214,7 @@ def write_config(config: ChaineConfig, path: Path | None = None) -> Path:
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
-        from .erreurs import ConfigurationError
-
-        raise ConfigurationError(f"impossible d'ecrire la configuration : {error}") from error
+        raise ConfigurationError(f"impossible d'ecrire la configuration : {resolved_path} ({error})") from error
     return resolved_path
 
 
@@ -258,11 +270,15 @@ def _activate_dependency(structural_check: DependencyCheck) -> DependencyCheck:
     import_root = structural_check.import_root
     resolved_import_root = import_root.resolve()
 
-    _prioritize_sys_path_entry(import_root)
-
+    # sys.modules doit etre examine avant toute modification de sys.path : si
+    # le paquet est deja charge depuis un autre depot, la seule issue propre
+    # est restart_required, et sys.path ne doit alors rester dans aucun etat
+    # hybride (nouvelle racine deja prioritaire mais ancien module actif).
     existing_module = sys.modules.get(package_name)
     if existing_module is not None:
         return _check_already_loaded_module(structural_check, existing_module, resolved_import_root)
+
+    _prioritize_sys_path_entry(import_root)
 
     try:
         module = importlib.import_module(package_name)

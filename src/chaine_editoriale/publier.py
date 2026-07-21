@@ -131,7 +131,12 @@ def publier(
         raise TeiWriteError(f"ecriture de la TEI impossible : {tei_path}", cause=error) from error
 
     media_directory = Path(write_result.media_directory) if write_result.media_directory else None
-    assets_root = _preparer_assets_impressions(media_directory, workspace_dir)
+    assets_root, media_layout = prepare_media_layout_for_impressions(
+        media_directory,
+        workspace_dir,
+        output_dir,
+        pdf_export_requested=resolved_options.pdf_export_mode != "none",
+    )
 
     build_config = purh_site_api.BuildConfig(
         output_dir=output_dir,
@@ -172,6 +177,7 @@ def publier(
         },
         pdf_status=pdf_status,
         dependencies=dependencies,
+        media_layout=media_layout,
     )
     write_publication_manifest(manifest, manifest_path)
 
@@ -211,38 +217,84 @@ def _pdf_status(pdf_export_mode: str, pdf_path: Path | None) -> str:
     return "unavailable"
 
 
-def _preparer_assets_impressions(media_directory: Path | None, workspace_dir: Path) -> Path | None:
-    """Copier <media_directory> vers workspace/impressions-assets en preservant le niveau media/.
+def prepare_media_layout_for_impressions(
+    media_directory: Path | None,
+    workspace_dir: Path,
+    output_dir: Path,
+    *,
+    pdf_export_requested: bool,
+) -> tuple[Path | None, dict[str, Path | None]]:
+    """Placer les medias intermediaires aux emplacements reellement lus par Impressions.
 
-    Impressions copie tel quel le contenu d'``assets_dir`` a la racine des
-    assets du site ; passer directement le dossier ``media`` produit par
-    Mini-Metopes supprimerait donc ce niveau. On construit ici une racine
-    d'assets intermediaire qui contient un sous-dossier ``media``.
+    Impressions expose deux contrats de resolution distincts et
+    **incompatibles entre eux** pour une meme URL ``tei:graphic/@url`` du
+    type ``media/<sha256><ext>`` (convention fixe de la TEI Commons
+    Publishing produite par Mini-Metopes) :
 
-    Le fragment HTML genere par Impressions prefixe systematiquement toute
-    URL de graphic TEI qui ne commence pas deja par ``assets/`` avec
-    ``assets/images/`` (``resolved-image-src`` dans
-    ``tei_to_html.xsl``) ; comme la TEI Commons Publishing de Mini-Metopes
-    utilise toujours des URL ``media/<sha256><ext>``, la reference HTML
-    reelle est ``assets/images/media/...``. Les memes fichiers sont donc
-    egalement places sous ``images/media/`` afin que cette reference se
-    resolve reellement, sans dupliquer la logique de rendu d'Impressions ni
-    modifier son code.
+    1. **HTML** (``purh_site.site_builder`` + ``resources/tei_to_html.xsl``) :
+       ``SiteBuilder`` copie tel quel le contenu de ``BuildConfig.assets_dir``
+       sous ``output_dir/assets/`` (``_copy_user_assets``), et le fragment
+       XSLT prefixe toute URL ne commencant pas deja par ``assets/`` avec
+       ``assets/images/`` (template ``resolved-image-src``). La reference
+       HTML reelle est donc ``assets/images/media/<sha256><ext>`` : il faut
+       placer les medias sous ``assets_dir/images/media/``.
+
+    2. **LaTEI/PDF** (``purh_site.latei_assets.package_latei_graphics``,
+       appele par ``purh_site.site_builder._build_pdf_site_artifacts``) :
+       cette etape resout chaque ``@url`` **relativement au dossier du
+       fichier TEI source** passe a l'export reversible, qui est toujours
+       ``output_dir/book.normalized.xml`` pour le pipeline site — donc
+       relativement a ``output_dir`` lui-meme, jamais a ``assets_dir``. Sans
+       media a cet endroit, l'empaquetage LaTEI echoue silencieusement
+       (avertissement dans le rapport, aucune erreur) et la figure est
+       remplacee dans le PDF par un encadre "Image absente ou non fournie"
+       (voir ``purh_site.latei_driver`` / macro LaTeX
+       ``\\latei_figure_fallback:``).
+
+    Ces deux resolutions ne peuvent pas etre satisfaites par un seul
+    emplacement sans modifier Impressions (voir le rapport de passe pour la
+    proposition de correction upstream). Cette fonction documente donc
+    explicitement les deux copies necessaires, chacune protegee par un test
+    d'integration distinct, plutot que de dupliquer implicitement la copie
+    dans le corps de ``publier()``.
+
+    Retourne l'``assets_dir`` a transmettre a ``BuildConfig`` (ou ``None``
+    en l'absence de media) et un dictionnaire de diagnostic destine au
+    manifeste (``media_layout``).
     """
     if media_directory is None:
-        return None
+        return None, {}
     if not media_directory.exists():
         raise AssetPreparationError(f"dossier de medias annonce mais introuvable : {media_directory}")
 
-    assets_root = workspace_dir / "impressions-assets"
     try:
         source_files = sorted(path for path in media_directory.iterdir() if path.is_file())
     except OSError as error:
         raise AssetPreparationError(f"lecture du dossier de medias impossible : {media_directory}", cause=error) from error
 
-    for relative_destination in ("media", "images/media"):
-        _copy_media_tree(source_files, assets_root / relative_destination)
-    return assets_root
+    assets_root = workspace_dir / "impressions-assets"
+    html_media_dir = assets_root / "images" / "media"
+    _copy_media_tree(source_files, html_media_dir)
+
+    media_layout: dict[str, Path | None] = {
+        "source_media_directory": media_directory,
+        "html_media_directory": html_media_dir,
+        "latei_media_directory": None,
+    }
+
+    if pdf_export_requested:
+        # Contournement minimal et documente pour purh_site.latei_assets :
+        # voir la docstring ci-dessus. output_dir n'existe pas forcement
+        # encore a ce stade (SiteBuilder le cree normalement lui-meme).
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise AssetPreparationError(f"preparation du dossier de sortie impossible : {output_dir}", cause=error) from error
+        latei_media_dir = output_dir / "media"
+        _copy_media_tree(source_files, latei_media_dir)
+        media_layout["latei_media_directory"] = latei_media_dir
+
+    return assets_root, media_layout
 
 
 def _copy_media_tree(source_files: list[Path], destination: Path) -> None:

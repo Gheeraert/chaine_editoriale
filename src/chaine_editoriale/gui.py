@@ -22,6 +22,7 @@ from .configuration import (
     today_iso,
     write_config,
 )
+from .erreurs import ConfigurationError
 
 SUGGESTED_MINI_METOPES_PATH = r"C:\minimetopes"
 SUGGESTED_PURH_SITE_PATH = r"C:\impression2"
@@ -137,7 +138,11 @@ def startup_screen(config_path: Path | None = None) -> tuple[str, ConfigControll
     if verification.success:
         try:
             write_config(ChaineConfig(config.mini_metopes_path, config.purh_site_path, last_verified=today_iso()), resolved_path)
-        except Exception as error:  # noqa: BLE001 - avertissement seulement, la resolution reste un succes reel.
+        except ConfigurationError as error:
+            # Seule l'ecriture de last_verified est en cause : la resolution
+            # des dependances reste un succes reel, donc l'ecran principal
+            # doit rester accessible. Une erreur non prevue (hors
+            # ConfigurationError) n'est en revanche jamais avalee ici.
             controller.startup_warning = f"date de derniere verification non mise a jour : {error}"
         return "main", controller
     return "config", controller

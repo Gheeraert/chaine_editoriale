@@ -61,13 +61,21 @@ def build_publication_manifest(
     outputs: dict[str, Path | None],
     pdf_status: str,
     dependencies: dict[str, dict[str, str]],
+    media_layout: dict[str, Path | None] | None = None,
 ) -> dict[str, Any]:
-    """Construire le manifeste de publication sous forme de dictionnaire deterministe."""
+    """Construire le manifeste de publication sous forme de dictionnaire deterministe.
+
+    ``media_layout``, lorsque fourni, documente les emplacements physiques
+    ou les medias intermediaires ont ete dupliques pour satisfaire les
+    contrats distincts d'Impressions pour le HTML et pour LaTEI/PDF (voir
+    ``publier.prepare_media_layout_for_impressions``). Omis lorsqu'il n'y a
+    pas de media, pour rester retrocompatible avec les manifestes existants.
+    """
 
     def rel(path: Path | None) -> str | None:
         return path_for_manifest(path, manifest_dir)
 
-    return {
+    manifest: dict[str, Any] = {
         "schema": MANIFEST_SCHEMA_NAME,
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "sources": {
@@ -102,6 +110,9 @@ def build_publication_manifest(
         "pdf_status": pdf_status,
         "dependencies": dependencies,
     }
+    if media_layout:
+        manifest["assets"] = {key: rel(value) for key, value in media_layout.items()}
+    return manifest
 
 
 def write_publication_manifest(manifest: dict[str, Any], path: Path) -> Path:

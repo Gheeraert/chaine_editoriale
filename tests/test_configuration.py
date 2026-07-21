@@ -137,6 +137,62 @@ def test_write_config_does_not_overwrite_on_failure(tmp_path: Path, monkeypatch:
     assert path.read_text(encoding="utf-8") == original_text
 
 
+def test_write_config_wraps_parent_directory_creation_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "sub" / "config_chaine.json"
+
+    def failing_mkdir(*_args: object, **_kwargs: object) -> None:
+        raise OSError("dossier inaccessible simule")
+
+    monkeypatch.setattr(cfg.Path, "mkdir", failing_mkdir)
+    config = cfg.ChaineConfig(mini_metopes_path=Path("C:/a"), purh_site_path=Path("C:/b"))
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        cfg.write_config(config, path)
+
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert str(path.parent) in str(excinfo.value)
+    assert not path.exists()
+
+
+def test_write_config_preserves_existing_configuration_when_directory_creation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "config_chaine.json"
+    original = cfg.ChaineConfig(mini_metopes_path=Path("C:/a"), purh_site_path=Path("C:/b"))
+    cfg.write_config(original, path)
+    original_text = path.read_text(encoding="utf-8")
+
+    real_mkdir = cfg.Path.mkdir
+
+    def failing_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        if self == path.parent:
+            raise OSError("dossier inaccessible simule")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(cfg.Path, "mkdir", failing_mkdir)
+    broken = cfg.ChaineConfig(mini_metopes_path=Path("C:/z"), purh_site_path=Path("C:/z"))
+
+    with pytest.raises(ConfigurationError):
+        cfg.write_config(broken, path)
+    assert path.read_text(encoding="utf-8") == original_text
+    assert list(path.parent.glob(".*")) == []
+
+
+def test_write_config_error_message_contains_configuration_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "config_chaine.json"
+    config = cfg.ChaineConfig(mini_metopes_path=Path("C:/a"), purh_site_path=Path("C:/b"))
+    cfg.write_config(config, path)
+
+    def failing_replace(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated failure")
+
+    monkeypatch.setattr(cfg.os, "replace", failing_replace)
+    with pytest.raises(ConfigurationError) as excinfo:
+        cfg.write_config(config, path)
+    assert str(path) in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, OSError)
+
+
 # ---------------------------------------------------------------------------
 # Verification structurelle des depots
 
@@ -377,3 +433,89 @@ def test_default_config_path_uses_appdata(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("APPDATA", r"C:\Users\Someone\AppData\Roaming")
     path = cfg.default_config_path()
     assert path == Path(r"C:\Users\Someone\AppData\Roaming") / "ChaineEditoriale" / "config_chaine.json"
+
+
+# ---------------------------------------------------------------------------
+# sys.path ne doit jamais bouger quand restart_required (ordre sys.modules avant sys.path)
+
+
+def _other_mini_metopes_repo(tmp_path: Path) -> Path:
+    other_repo = tmp_path / "other_mini_metopes"
+    (other_repo / "mini_metopes").mkdir(parents=True)
+    (other_repo / "mini_metopes" / "__init__.py").write_text("", encoding="utf-8")
+    (other_repo / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    return other_repo
+
+
+def test_restart_required_leaves_sys_path_completely_unchanged(
+    tmp_path: Path, real_repos: tuple[Path, Path], restore_sys_path: None
+) -> None:
+    mini_metopes_path, purh_site_path = real_repos
+    other_repo = _other_mini_metopes_repo(tmp_path)
+
+    import mini_metopes  # garantir que le vrai module est deja charge depuis C:\minimetopes
+
+    before = list(sys.path)
+    config = cfg.ChaineConfig(mini_metopes_path=other_repo, purh_site_path=purh_site_path)
+    verification = cfg.activate_configured_dependencies(config)
+    after = list(sys.path)
+
+    assert verification.mini_metopes.state == "restart_required"
+    assert after == before, "sys.path ne doit subir aucune modification, meme partielle, en cas de restart_required"
+    resolved_other_root = other_repo.resolve()
+    assert not any(entry and Path(entry).resolve() == resolved_other_root for entry in after)
+
+
+def test_restart_required_configuration_stays_savable(tmp_path: Path, real_repos: tuple[Path, Path], restore_sys_path: None) -> None:
+    mini_metopes_path, purh_site_path = real_repos
+    other_repo = _other_mini_metopes_repo(tmp_path)
+
+    import mini_metopes  # noqa: F401 - garantir le module deja charge
+
+    config = cfg.ChaineConfig(mini_metopes_path=other_repo, purh_site_path=purh_site_path)
+    verification = cfg.activate_configured_dependencies(config)
+
+    assert verification.can_be_saved
+    written = cfg.write_config(
+        cfg.ChaineConfig(mini_metopes_path=other_repo, purh_site_path=purh_site_path, last_verified=None),
+        tmp_path / "config_chaine.json",
+    )
+    reloaded = cfg.load_config(written)
+    assert reloaded.valid
+    assert reloaded.config is not None
+    assert reloaded.config.last_verified is None
+
+
+def test_restart_then_clean_process_prioritizes_new_root_and_imports(
+    tmp_path: Path, real_repos: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, restore_sys_path: None
+) -> None:
+    """Simule un redemarrage : sys.modules nettoye, la racine configuree doit primer et l'import reussir."""
+    mini_metopes_path, purh_site_path = real_repos
+    other_repo = _other_mini_metopes_repo(tmp_path)
+
+    stale_names = [name for name in list(sys.modules) if name == "mini_metopes" or name.startswith("mini_metopes.")]
+    for name in stale_names:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    config = cfg.ChaineConfig(mini_metopes_path=other_repo, purh_site_path=purh_site_path)
+    verification = cfg.activate_configured_dependencies(config)
+
+    assert verification.mini_metopes.state == "success"
+    assert sys.path[0] == str(other_repo.resolve())
+    assert verification.mini_metopes.module_path is not None
+    assert Path(verification.mini_metopes.module_path).resolve() == (other_repo / "mini_metopes" / "__init__.py").resolve()
+
+
+def test_activate_idempotent_when_already_loaded_from_configured_repo(
+    real_repos: tuple[Path, Path], restore_sys_path: None
+) -> None:
+    mini_metopes_path, purh_site_path = real_repos
+    config = cfg.ChaineConfig(mini_metopes_path=mini_metopes_path, purh_site_path=purh_site_path)
+
+    first = cfg.activate_configured_dependencies(config)
+    after_first = list(sys.path)
+    second = cfg.activate_configured_dependencies(config)
+    after_second = list(sys.path)
+
+    assert first.success and second.success
+    assert after_first == after_second

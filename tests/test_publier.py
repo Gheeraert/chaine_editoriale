@@ -225,12 +225,67 @@ def test_publier_preserves_media_level_and_detects_conflict(tmp_path: Path, monk
     metadata_path = tmp_path / "meta.json"
     metadata_path.write_text("{}", encoding="utf-8")
 
-    result = publier_module.publier(minimal_docx_path, metadata_path, workspace, output)
+    result = publier_module.publier(
+        minimal_docx_path, metadata_path, workspace, output, options=PublicationOptions(pdf_export_mode="none")
+    )
 
     assets_root = captured_assets_dir["assets_dir"]
     assert assets_root == workspace / "impressions-assets"
-    assert (assets_root / "media" / "abc.png").read_bytes() == b"fake-png-bytes"
+    assert (assets_root / "images" / "media" / "abc.png").read_bytes() == b"fake-png-bytes"
     assert result.assets_root == assets_root
+    # pdf_export_mode="none" : la copie LaTEI vers output_dir/media/ n'est pas necessaire.
+    assert not (output / "media").exists()
+
+
+def test_prepare_media_layout_places_media_for_html_and_latei_separately(tmp_path: Path) -> None:
+    """Protege les deux usages distincts et incompatibles decouverts pour Impressions.
+
+    HTML lit ``assets_dir/images/media/`` (prefixe assets/images/ ajoute par
+    tei_to_html.xsl) ; LaTEI/PDF lit ``output_dir/media/`` (resolution
+    relative au fichier TEI source dans purh_site.latei_assets). Voir la
+    docstring de ``prepare_media_layout_for_impressions``.
+    """
+    workspace = tmp_path / "workspace"
+    output = tmp_path / "output"
+    media_source = workspace / "source" / "media"
+    media_source.mkdir(parents=True)
+    (media_source / "abc.png").write_bytes(b"fake-png-bytes")
+
+    assets_root, layout = publier_module.prepare_media_layout_for_impressions(
+        media_source, workspace, output, pdf_export_requested=True
+    )
+
+    assert assets_root == workspace / "impressions-assets"
+    html_media_dir = assets_root / "images" / "media"
+    latei_media_dir = output / "media"
+    assert html_media_dir.is_dir()
+    assert latei_media_dir.is_dir()
+    assert (html_media_dir / "abc.png").read_bytes() == b"fake-png-bytes"
+    assert (latei_media_dir / "abc.png").read_bytes() == b"fake-png-bytes"
+    # Le contrat HTML n'a jamais besoin d'un dossier "media" nu a la racine des assets.
+    assert not (assets_root / "media").exists()
+
+    assert layout == {
+        "source_media_directory": media_source,
+        "html_media_directory": html_media_dir,
+        "latei_media_directory": latei_media_dir,
+    }
+
+
+def test_prepare_media_layout_skips_latei_copy_when_pdf_not_requested(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    output = tmp_path / "output"
+    media_source = workspace / "source" / "media"
+    media_source.mkdir(parents=True)
+    (media_source / "abc.png").write_bytes(b"fake-png-bytes")
+
+    assets_root, layout = publier_module.prepare_media_layout_for_impressions(
+        media_source, workspace, output, pdf_export_requested=False
+    )
+
+    assert (assets_root / "images" / "media" / "abc.png").is_file()
+    assert layout["latei_media_directory"] is None
+    assert not output.exists()
 
 
 def test_publier_media_conflict_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minimal_docx_path: Path) -> None:
@@ -240,7 +295,7 @@ def test_publier_media_conflict_raises(tmp_path: Path, monkeypatch: pytest.Monke
     media_source.mkdir(parents=True)
     (media_source / "abc.png").write_bytes(b"fake-png-bytes")
 
-    existing = workspace / "impressions-assets" / "media"
+    existing = workspace / "impressions-assets" / "images" / "media"
     existing.mkdir(parents=True)
     (existing / "abc.png").write_bytes(b"different-bytes")
 
