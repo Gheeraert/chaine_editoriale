@@ -26,6 +26,18 @@ dependances distribuees de `pyproject.toml`. En production, ces deux
 bibliotheques sont supposees deja installees dans l'environnement Python
 utilise par `chaine-editoriale`.
 
+## Lancer la GUI
+
+```powershell
+.\.venv\Scripts\chaine-editoriale.exe
+```
+
+ou, de maniere equivalente :
+
+```powershell
+.\.venv\Scripts\python.exe -m chaine_editoriale.gui
+```
+
 ## Lancer les tests
 
 ```powershell
@@ -85,3 +97,36 @@ diagnostic precis. Si un ancien exemplaire de `mini_metopes` ou `purh_site`
 est deja charge en memoire depuis un autre emplacement, l'application
 demande explicitement un redemarrage apres l'enregistrement de la nouvelle
 configuration.
+
+## Ecran de publication
+
+Une fois les deux depots configures et valides, l'ecran principal permet de
+publier **un document a la fois** (pas de traitement par lots dans cette
+version). Il demande quatre chemins :
+
+- le **document DOCX** a publier ;
+- ses **metadonnees JSON** (voir Mini-Metopes pour leur schema) ;
+- le **dossier de travail** : ou sont ecrits les intermediaires (`document.xml`
+  Commons Publishing, medias extraits, `publication.json`) ;
+- le **dossier de publication** : ou `purh_site.SiteBuilder` ecrit le site
+  fini (`index.html`, `book.normalized.xml`, LaTEI/PDF eventuels).
+
+Trois modes de sortie sont proposes :
+
+| Libelle affiche                              | `pdf_export_mode` |
+|-----------------------------------------------|--------------------|
+| HTML + XML normalise                           | `none`             |
+| HTML + XML normalise + LaTEI                   | `latei`             |
+| HTML + XML normalise + LaTEI + PDF (par defaut)| `latei_pdf`         |
+
+Le XML normalise est toujours produit, quel que soit le mode. Le moteur
+LaTeX propose est uniquement **LuaLaTeX** (seul moteur reellement pris en
+charge par Impressions, dont le preambule LaTEI charge `fontspec`). Si
+LuaLaTeX n'est pas installe sur la machine, la publication en mode
+`latei_pdf` produit tout de meme le HTML, le XML normalise et le LaTEI ; seul
+le PDF est rapporte comme `unavailable` (« demande mais non produit »), sans
+faire echouer le reste de la publication.
+
+La publication s'execute dans un thread separe (la fenetre reste reactive)
+et affiche un rapport final listant les artefacts reellement produits, avec
+des boutons pour les ouvrir directement (association Windows par defaut).
