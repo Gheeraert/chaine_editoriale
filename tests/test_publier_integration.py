@@ -152,6 +152,24 @@ def test_publier_end_to_end_with_real_image(
     resolved_manifest_media = (result.manifest_path.parent / manifest_media_directory).resolve()
     assert resolved_manifest_media == result.media_directory.resolve()
 
+    # La section "assets" (objectif 6) documente les repertoires source/final
+    # HTML et le repertoire source LaTEI (absent ici : pdf_export_mode="none").
+    assets_section = manifest["assets"]
+    assert set(assets_section) == {
+        "source_media_directory",
+        "html_assets_source_directory",
+        "html_output_directory",
+        "latei_source_directory",
+    }
+    assert assets_section["latei_source_directory"] is None
+    manifest_dir = result.manifest_path.parent
+    for key in ("source_media_directory", "html_assets_source_directory", "html_output_directory"):
+        value = assets_section[key]
+        assert value is not None, key
+        resolved = (manifest_dir / value).resolve()
+        assert resolved.is_dir(), (key, value, resolved)
+    assert (manifest_dir / assets_section["html_output_directory"]).resolve() == output_media_dir.resolve()
+
 
 @pytest.mark.integration
 def test_publier_latei_pdf_with_real_image(
@@ -272,6 +290,23 @@ def test_publier_latei_pdf_with_real_image(
         assert result.pdf_status in {"unavailable", "generated"}
         if result.pdf_status == "unavailable":
             assert result.pdf_path is None
+
+    # Section "assets" (objectif 6) : les quatre repertoires doivent tous
+    # exister et se resoudre depuis publication.json (latei demande ici).
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assets_section = manifest["assets"]
+    assert set(assets_section) == {
+        "source_media_directory",
+        "html_assets_source_directory",
+        "html_output_directory",
+        "latei_source_directory",
+    }
+    manifest_dir = result.manifest_path.parent
+    for key, value in assets_section.items():
+        assert value is not None, key
+        resolved = (manifest_dir / value).resolve()
+        assert resolved.is_dir(), (key, value, resolved)
+        diagnostics[f"manifest_{key}"] = str(resolved)
 
     print("\n--- Diagnostic chemins d'image (pipeline complet DOCX avec image) ---")
     for key, value in diagnostics.items():

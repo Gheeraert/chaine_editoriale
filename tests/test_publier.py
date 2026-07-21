@@ -252,23 +252,23 @@ def test_prepare_media_layout_places_media_for_html_and_latei_separately(tmp_pat
     (media_source / "abc.png").write_bytes(b"fake-png-bytes")
 
     assets_root, layout = publier_module.prepare_media_layout_for_impressions(
-        media_source, workspace, output, pdf_export_requested=True
+        media_source, workspace, output, latei_export_requested=True
     )
 
     assert assets_root == workspace / "impressions-assets"
-    html_media_dir = assets_root / "images" / "media"
-    latei_media_dir = output / "media"
-    assert html_media_dir.is_dir()
-    assert latei_media_dir.is_dir()
-    assert (html_media_dir / "abc.png").read_bytes() == b"fake-png-bytes"
-    assert (latei_media_dir / "abc.png").read_bytes() == b"fake-png-bytes"
+    html_assets_source_dir = assets_root / "images" / "media"
+    latei_source_dir = output / "media"
+    assert html_assets_source_dir.is_dir()
+    assert latei_source_dir.is_dir()
+    assert (html_assets_source_dir / "abc.png").read_bytes() == b"fake-png-bytes"
+    assert (latei_source_dir / "abc.png").read_bytes() == b"fake-png-bytes"
     # Le contrat HTML n'a jamais besoin d'un dossier "media" nu a la racine des assets.
     assert not (assets_root / "media").exists()
 
     assert layout == {
         "source_media_directory": media_source,
-        "html_media_directory": html_media_dir,
-        "latei_media_directory": latei_media_dir,
+        "html_assets_source_directory": html_assets_source_dir,
+        "latei_source_directory": latei_source_dir,
     }
 
 
@@ -280,12 +280,73 @@ def test_prepare_media_layout_skips_latei_copy_when_pdf_not_requested(tmp_path: 
     (media_source / "abc.png").write_bytes(b"fake-png-bytes")
 
     assets_root, layout = publier_module.prepare_media_layout_for_impressions(
-        media_source, workspace, output, pdf_export_requested=False
+        media_source, workspace, output, latei_export_requested=False
     )
 
     assert (assets_root / "images" / "media" / "abc.png").is_file()
-    assert layout["latei_media_directory"] is None
+    assert layout["latei_source_directory"] is None
     assert not output.exists()
+
+
+def test_publier_manifest_assets_section_has_stable_resolvable_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minimal_docx_path: Path
+) -> None:
+    """Les quatre cles du contrat des medias (objectif 6) doivent toutes se resoudre."""
+    workspace = tmp_path / "workspace"
+    output = tmp_path / "output"
+    media_source = workspace / "source" / "media"
+    media_source.mkdir(parents=True)
+    (media_source / "abc.png").write_bytes(b"fake-png-bytes")
+
+    def _write_tei(conversion: Any, output_path: Path) -> _FakeWriteResult:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("<TEI/>", encoding="utf-8")
+        return _FakeWriteResult(media_directory=str(media_source))
+
+    class _SiteBuilderCopyingHtmlAssets(_FakeSiteBuilder):
+        def build_from_master(self, xml_path: Path, config: Any) -> _FakeBuildResult:
+            result = super().build_from_master(xml_path, config)
+            # Simule ce que fait reellement purh_site.site_builder._copy_user_assets :
+            # copier le contenu de assets_dir sous output_dir/assets/.
+            html_output_dir = output / "assets" / "images" / "media"
+            html_output_dir.mkdir(parents=True, exist_ok=True)
+            (html_output_dir / "abc.png").write_bytes(b"fake-png-bytes")
+            return result
+
+    mini_metopes_api = publier_module._MiniMetopesApi(
+        load_metadata_file=lambda path: _FakeMetadataResult(metadata=object()),
+        convert_docx_to_tei=lambda path, metadata: _FakeConversionResult(is_successful=True),
+        write_tei_conversion_result=_write_tei,
+        compute_file_sha256=lambda path: "0" * 64,
+    )
+    build_result = _FakeBuildResult(output, output / "index.html", None, output / "build_report.txt")
+    purh_site_api = publier_module._PurhSiteApi(
+        BuildConfig=lambda **kwargs: kwargs, SiteBuilder=lambda: _SiteBuilderCopyingHtmlAssets(build_result)
+    )
+    monkeypatch.setattr(publier_module, "_charger_dependances_metier", lambda: (mini_metopes_api, purh_site_api))
+
+    metadata_path = tmp_path / "meta.json"
+    metadata_path.write_text("{}", encoding="utf-8")
+
+    result = publier_module.publier(
+        minimal_docx_path, metadata_path, workspace, output, options=PublicationOptions(pdf_export_mode="latei")
+    )
+
+    import json
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assets = manifest["assets"]
+    assert set(assets) == {
+        "source_media_directory",
+        "html_assets_source_directory",
+        "html_output_directory",
+        "latei_source_directory",
+    }
+    manifest_dir = result.manifest_path.parent
+    for key, value in assets.items():
+        assert value is not None, key
+        resolved = (manifest_dir / value).resolve() if not Path(value).is_absolute() else Path(value).resolve()
+        assert resolved.is_dir(), (key, value, resolved)
 
 
 def test_publier_media_conflict_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minimal_docx_path: Path) -> None:

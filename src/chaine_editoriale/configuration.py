@@ -14,7 +14,7 @@ import json
 import os
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Literal
@@ -253,46 +253,146 @@ def _detect_import_root(repository_path: Path, package_name: str) -> Path | None
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class _DependencyPreflight:
+    """Bilan sans effet de bord d'une dependance, avant toute mutation eventuelle."""
+
+    structural_check: DependencyCheck
+    loaded_check: DependencyCheck | None
+    requires_activation: bool
+
+
 def activate_configured_dependencies(config: ChaineConfig) -> DependencyVerification:
-    """Activer sys.path pour les deux depots configures et importer/verifier reellement les paquets."""
-    structural = verify_config(config)
-    return DependencyVerification(
-        mini_metopes=_activate_dependency(structural.mini_metopes),
-        purh_site=_activate_dependency(structural.purh_site),
-    )
+    """Activer les deux depots configures de maniere transactionnelle au niveau du couple.
+
+    Deux phases strictement separees :
+
+    1. **Preflight** (``_preflight_dependency``) : verification structurelle
+       et examen de ``sys.modules`` pour les deux dependances, sans jamais
+       modifier ``sys.path`` ni importer quoi que ce soit.
+    2. **Decision puis activation** : si l'une des deux dependances est en
+       ``error`` ou en ``restart_required``, la fonction retourne
+       immediatement sans la moindre mutation de ``sys.path``/``sys.modules``
+       pour l'autre dependance, meme si celle-ci est structurellement valide
+       et non encore chargee. L'activation reelle (priorisation de
+       ``sys.path`` puis import) n'a lieu que lorsque le couple entier est
+       exempt d'erreur et de redemarrage requis.
+    """
+    preflights = {
+        "mini_metopes": _preflight_dependency("mini_metopes", config.mini_metopes_path),
+        "purh_site": _preflight_dependency("purh_site", config.purh_site_path),
+    }
+
+    resolved: dict[str, DependencyCheck] = {}
+    for name, preflight in preflights.items():
+        if preflight.loaded_check is not None:
+            resolved[name] = preflight.loaded_check
+        elif preflight.structural_check.state != "success":
+            resolved[name] = preflight.structural_check
+
+    has_error = any(check.state == "error" for check in resolved.values())
+    has_restart_required = any(check.state == "restart_required" for check in resolved.values())
+
+    if has_error or has_restart_required:
+        # Aucune mutation : les dependances structurellement valides mais pas
+        # encore chargees restent a l'etat structurel "success" (premiere
+        # solution documentee dans la passe), avec un message precisant
+        # qu'elles n'ont volontairement pas ete activees.
+        final_checks: dict[str, DependencyCheck] = {}
+        for name, preflight in preflights.items():
+            if name in resolved:
+                final_checks[name] = resolved[name]
+            else:
+                final_checks[name] = replace(
+                    preflight.structural_check,
+                    message=(
+                        preflight.structural_check.message
+                        + " (activation differee : l'autre dependance impose une erreur ou un redemarrage)"
+                    ),
+                )
+        return DependencyVerification(final_checks["mini_metopes"], final_checks["purh_site"])
+
+    return _activate_missing_dependencies(preflights, resolved)
 
 
-def _activate_dependency(structural_check: DependencyCheck) -> DependencyCheck:
-    if not structural_check.success or structural_check.import_root is None:
-        return structural_check
+def _preflight_dependency(package_name: str, repository_path: Path) -> _DependencyPreflight:
+    """Examiner une dependance sans jamais modifier sys.path ni sys.modules."""
+    structural_check = _verify_repository_structure(package_name, repository_path)
+    if structural_check.state != "success" or structural_check.import_root is None:
+        return _DependencyPreflight(structural_check, None, False)
 
-    package_name = structural_check.dependency_name
-    import_root = structural_check.import_root
-    resolved_import_root = import_root.resolve()
-
-    # sys.modules doit etre examine avant toute modification de sys.path : si
-    # le paquet est deja charge depuis un autre depot, la seule issue propre
-    # est restart_required, et sys.path ne doit alors rester dans aucun etat
-    # hybride (nouvelle racine deja prioritaire mais ancien module actif).
     existing_module = sys.modules.get(package_name)
-    if existing_module is not None:
-        return _check_already_loaded_module(structural_check, existing_module, resolved_import_root)
+    if existing_module is None:
+        return _DependencyPreflight(structural_check, None, True)
 
-    _prioritize_sys_path_entry(import_root)
+    resolved_import_root = structural_check.import_root.resolve()
+    loaded_check = _check_already_loaded_module(structural_check, existing_module, resolved_import_root)
+    return _DependencyPreflight(structural_check, loaded_check, False)
 
-    try:
-        module = importlib.import_module(package_name)
-    except Exception as error:  # noqa: BLE001 - converti en diagnostic structure, jamais relance brut.
-        return DependencyCheck(
-            package_name,
-            structural_check.configured_repository,
-            import_root,
-            None,
-            "error",
-            f"le module {package_name} n'a pas pu etre importe depuis {import_root} : {error}",
-        )
 
-    return _check_resolved_module(structural_check, module, resolved_import_root)
+def _activate_missing_dependencies(
+    preflights: dict[str, _DependencyPreflight], resolved: dict[str, DependencyCheck]
+) -> DependencyVerification:
+    """Activer les dependances encore non chargees, apres un preflight entierement propre.
+
+    A ce stade, aucune erreur ni redemarrage requis n'a ete detecte : toute
+    entree de ``resolved`` est donc necessairement un chargement deja
+    reussi (``state == "success"``). Les racines manquantes sont d'abord
+    toutes priorisees dans ``sys.path`` (mutation deterministe), puis les
+    imports sont tentes. En cas d'echec d'import, ``sys.path`` est restaure
+    a son etat exact d'avant activation ; aucun module deja importe avec
+    succes pendant cette meme activation n'est retire de ``sys.modules``
+    (un tel rollback serait dangereux), mais le diagnostic retourne signale
+    explicitement qu'un import partiel a eu lieu et qu'un redemarrage est
+    prudent.
+    """
+    final_checks = dict(resolved)
+    pending_names = [name for name in preflights if name not in final_checks]
+
+    if not pending_names:
+        return DependencyVerification(final_checks["mini_metopes"], final_checks["purh_site"])
+
+    sys_path_before = list(sys.path)
+
+    # Mutation de sys.path deterministe pour toutes les racines manquantes,
+    # avant tout import.
+    for name in pending_names:
+        import_root = preflights[name].structural_check.import_root
+        assert import_root is not None
+        _prioritize_sys_path_entry(import_root)
+
+    imported_names: list[str] = []
+    for name in pending_names:
+        preflight = preflights[name]
+        import_root = preflight.structural_check.import_root
+        assert import_root is not None
+        try:
+            module = importlib.import_module(name)
+        except Exception as error:  # noqa: BLE001 - converti en diagnostic structure, jamais relance brut.
+            sys.path[:] = sys_path_before
+            partial_note = ""
+            if imported_names:
+                partial_note = (
+                    f" Un import partiel a deja eu lieu pour {', '.join(imported_names)} avant cet echec ; "
+                    "un redemarrage de l'application est prudent."
+                )
+            final_checks[name] = DependencyCheck(
+                name,
+                preflight.structural_check.configured_repository,
+                import_root,
+                None,
+                "error",
+                f"le module {name} n'a pas pu etre importe depuis {import_root} : {error}.{partial_note}",
+            )
+            for other_name, other_preflight in preflights.items():
+                if other_name not in final_checks:
+                    final_checks[other_name] = other_preflight.structural_check
+            return DependencyVerification(final_checks["mini_metopes"], final_checks["purh_site"])
+
+        imported_names.append(name)
+        final_checks[name] = _check_resolved_module(preflight.structural_check, module, import_root.resolve())
+
+    return DependencyVerification(final_checks["mini_metopes"], final_checks["purh_site"])
 
 
 def _check_already_loaded_module(

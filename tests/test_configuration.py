@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -519,3 +520,251 @@ def test_activate_idempotent_when_already_loaded_from_configured_repo(
 
     assert first.success and second.success
     assert after_first == after_second
+
+
+# ---------------------------------------------------------------------------
+# Transactionnalite du couple mini_metopes/purh_site (activate_configured_dependencies)
+#
+# Ces tests sont volontairement independants des vrais depots et de l'ordre
+# d'execution de la suite : ils fabriquent leurs propres paquets factices et
+# isolent sys.path/sys.modules via la fixture isolated_dependency_modules.
+
+
+_DEPENDENCY_MODULE_PREFIXES = ("mini_metopes", "purh_site")
+
+
+def _is_dependency_module_name(name: str) -> bool:
+    return any(name == prefix or name.startswith(f"{prefix}.") for prefix in _DEPENDENCY_MODULE_PREFIXES)
+
+
+@pytest.fixture
+def isolated_dependency_modules():
+    """Retirer temporairement mini_metopes/purh_site de sys.modules et restaurer sys.path.
+
+    Garantit que les tests transactionnels ne reussissent jamais simplement
+    parce qu'un test precedent de la suite a deja importe mini_metopes ou
+    purh_site, et qu'aucun faux module ne survit au test.
+    """
+    saved_path = list(sys.path)
+    saved_modules = {name: sys.modules[name] for name in list(sys.modules) if _is_dependency_module_name(name)}
+    for name in saved_modules:
+        del sys.modules[name]
+    try:
+        yield
+    finally:
+        sys.path[:] = saved_path
+        for name in list(sys.modules):
+            if _is_dependency_module_name(name) and name not in saved_modules:
+                del sys.modules[name]
+        sys.modules.update(saved_modules)
+
+
+def _make_fake_repo(base: Path, package_name: str, label: str) -> Path:
+    """Fabriquer un depot factice valide et reellement importable."""
+    repo = base / f"{label}_{package_name}"
+    (repo / package_name).mkdir(parents=True)
+    (repo / package_name / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    return repo
+
+
+def _make_failing_repo(base: Path, package_name: str, label: str) -> Path:
+    """Fabriquer un depot factice structurellement valide mais dont l'import echoue reellement."""
+    repo = base / f"{label}_{package_name}"
+    (repo / package_name).mkdir(parents=True)
+    (repo / package_name / "__init__.py").write_text(
+        "raise RuntimeError('import volontairement casse')\n", encoding="utf-8"
+    )
+    (repo / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    return repo
+
+
+def _fake_loaded_module(monkeypatch: pytest.MonkeyPatch, package_name: str, repo: Path) -> None:
+    """Simuler package_name deja charge en memoire depuis repo, sans import reel."""
+    fake_module = types.ModuleType(package_name)
+    fake_module.__file__ = str((repo / package_name / "__init__.py").resolve())
+    monkeypatch.setitem(sys.modules, package_name, fake_module)
+
+
+def test_preflight_dependency_has_no_side_effects(tmp_path: Path, isolated_dependency_modules: None) -> None:
+    repo = _make_fake_repo(tmp_path, "mini_metopes", "preflight")
+    before_path = list(sys.path)
+    before_modules = dict(sys.modules)
+
+    preflight = cfg._preflight_dependency("mini_metopes", repo)
+
+    assert sys.path == before_path
+    assert sys.modules == before_modules
+    assert preflight.structural_check.state == "success"
+    assert preflight.loaded_check is None
+    assert preflight.requires_activation is True
+
+
+def test_transactional_case1_mini_metopes_conflict_purh_site_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_dependency_modules: None
+) -> None:
+    loaded_repo = _make_fake_repo(tmp_path, "mini_metopes", "case1-loaded")
+    configured_repo = _make_fake_repo(tmp_path, "mini_metopes", "case1-configured")
+    purh_site_repo = _make_fake_repo(tmp_path, "purh_site", "case1")
+    _fake_loaded_module(monkeypatch, "mini_metopes", loaded_repo)
+
+    assert "purh_site" not in sys.modules
+    before = list(sys.path)
+    config = cfg.ChaineConfig(mini_metopes_path=configured_repo, purh_site_path=purh_site_repo)
+    verification = cfg.activate_configured_dependencies(config)
+    after = list(sys.path)
+
+    assert verification.mini_metopes.state == "restart_required"
+    assert verification.restart_required is True
+    assert verification.can_be_saved is True
+    assert after == before, "aucune mutation de sys.path n'est autorisee quand une dependance impose restart_required"
+    assert "purh_site" not in sys.modules, "purh_site ne doit pas etre importe malgre sa configuration valide"
+    resolved_configured_root = configured_repo.resolve()
+    resolved_purh_site_root = purh_site_repo.resolve()
+    assert not any(entry and Path(entry).resolve() == resolved_configured_root for entry in after)
+    assert not any(entry and Path(entry).resolve() == resolved_purh_site_root for entry in after)
+
+
+def test_transactional_case2_purh_site_conflict_mini_metopes_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_dependency_modules: None
+) -> None:
+    loaded_repo = _make_fake_repo(tmp_path, "purh_site", "case2-loaded")
+    configured_repo = _make_fake_repo(tmp_path, "purh_site", "case2-configured")
+    mini_metopes_repo = _make_fake_repo(tmp_path, "mini_metopes", "case2")
+    _fake_loaded_module(monkeypatch, "purh_site", loaded_repo)
+
+    assert "mini_metopes" not in sys.modules
+    before = list(sys.path)
+    config = cfg.ChaineConfig(mini_metopes_path=mini_metopes_repo, purh_site_path=configured_repo)
+    verification = cfg.activate_configured_dependencies(config)
+    after = list(sys.path)
+
+    assert verification.purh_site.state == "restart_required"
+    assert verification.restart_required is True
+    assert verification.can_be_saved is True
+    assert after == before, "aucune mutation de sys.path n'est autorisee quand une dependance impose restart_required"
+    assert "mini_metopes" not in sys.modules, "mini_metopes ne doit pas etre importe malgre sa configuration valide"
+    resolved_configured_root = configured_repo.resolve()
+    resolved_mini_metopes_root = mini_metopes_repo.resolve()
+    assert not any(entry and Path(entry).resolve() == resolved_configured_root for entry in after)
+    assert not any(entry and Path(entry).resolve() == resolved_mini_metopes_root for entry in after)
+
+
+def test_transactional_case3_structural_error_blocks_valid_dependency(
+    tmp_path: Path, isolated_dependency_modules: None
+) -> None:
+    invalid_repo = tmp_path / "case3-invalid-mini-metopes"
+    invalid_repo.mkdir()
+    valid_purh_site_repo = _make_fake_repo(tmp_path, "purh_site", "case3")
+
+    assert "mini_metopes" not in sys.modules
+    assert "purh_site" not in sys.modules
+    before = list(sys.path)
+    config = cfg.ChaineConfig(mini_metopes_path=invalid_repo, purh_site_path=valid_purh_site_repo)
+    verification = cfg.activate_configured_dependencies(config)
+    after = list(sys.path)
+
+    assert verification.mini_metopes.state == "error"
+    assert not verification.success
+    assert after == before, "aucune mutation de sys.path n'est autorisee quand une dependance est en erreur"
+    assert "purh_site" not in sys.modules, "une dependance valide ne doit pas etre activee si l'autre est en erreur"
+    assert "mini_metopes" not in sys.modules
+
+
+def test_transactional_case4_two_absent_valid_dependencies_activate_deterministically(
+    tmp_path: Path, isolated_dependency_modules: None
+) -> None:
+    mini_metopes_repo = _make_fake_repo(tmp_path, "mini_metopes", "case4")
+    purh_site_repo = _make_fake_repo(tmp_path, "purh_site", "case4")
+    config = cfg.ChaineConfig(mini_metopes_path=mini_metopes_repo, purh_site_path=purh_site_repo)
+
+    first = cfg.activate_configured_dependencies(config)
+    after_first = list(sys.path)
+
+    assert first.success
+    assert first.mini_metopes.module_path is not None
+    assert Path(first.mini_metopes.module_path).resolve() == (mini_metopes_repo / "mini_metopes" / "__init__.py").resolve()
+    assert first.purh_site.module_path is not None
+    assert Path(first.purh_site.module_path).resolve() == (purh_site_repo / "purh_site" / "__init__.py").resolve()
+    assert after_first[0] == str(purh_site_repo.resolve())
+    assert str(mini_metopes_repo.resolve()) in after_first
+
+    second = cfg.activate_configured_dependencies(config)
+    after_second = list(sys.path)
+
+    assert second.success
+    assert after_first == after_second, "une seconde activation doit etre idempotente, sans croissance de sys.path"
+
+
+def test_transactional_case5_two_already_loaded_from_configured_repos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_dependency_modules: None
+) -> None:
+    mini_metopes_repo = _make_fake_repo(tmp_path, "mini_metopes", "case5")
+    purh_site_repo = _make_fake_repo(tmp_path, "purh_site", "case5")
+    _fake_loaded_module(monkeypatch, "mini_metopes", mini_metopes_repo)
+    _fake_loaded_module(monkeypatch, "purh_site", purh_site_repo)
+    mini_metopes_module_before = sys.modules["mini_metopes"]
+    purh_site_module_before = sys.modules["purh_site"]
+
+    before = list(sys.path)
+    config = cfg.ChaineConfig(mini_metopes_path=mini_metopes_repo, purh_site_path=purh_site_repo)
+    verification = cfg.activate_configured_dependencies(config)
+    after = list(sys.path)
+
+    assert verification.success
+    assert after == before, "sys.path ne doit pas bouger quand les deux dependances sont deja chargees correctement"
+    assert sys.modules["mini_metopes"] is mini_metopes_module_before, "aucun reimport ne doit avoir lieu"
+    assert sys.modules["purh_site"] is purh_site_module_before, "aucun reimport ne doit avoir lieu"
+
+    # Idempotent : un second appel produit le meme resultat.
+    verification_again = cfg.activate_configured_dependencies(config)
+    assert verification_again.success
+    assert list(sys.path) == after
+
+
+def test_transactional_case6_import_failure_rolls_back_sys_path(
+    tmp_path: Path, isolated_dependency_modules: None
+) -> None:
+    mini_metopes_repo = _make_fake_repo(tmp_path, "mini_metopes", "case6")
+    purh_site_repo = _make_failing_repo(tmp_path, "purh_site", "case6")
+
+    before = list(sys.path)
+    config = cfg.ChaineConfig(mini_metopes_path=mini_metopes_repo, purh_site_path=purh_site_repo)
+    verification = cfg.activate_configured_dependencies(config)
+    after = list(sys.path)
+
+    assert after == before, "sys.path doit etre integralement restaure apres un echec d'import"
+    assert verification.purh_site.state == "error"
+    assert isinstance(verification.purh_site.message, str)
+    assert "n'a pas pu etre importe" in verification.purh_site.message
+    assert "redemarrage" in verification.purh_site.message.lower()
+    # mini_metopes a reellement reussi son import pendant cette meme activation ;
+    # ce succes n'est pas annule (aucun rollback de sys.modules), mais reste
+    # signale dans le diagnostic de la dependance en echec.
+    assert "deja eu lieu pour mini_metopes" in verification.purh_site.message
+    assert verification.mini_metopes.state == "success"
+    assert "mini_metopes" in sys.modules
+    assert "purh_site" not in sys.modules
+
+
+def test_transactional_isolation_fixture_leaves_no_fake_module_behind(tmp_path: Path) -> None:
+    """isolated_dependency_modules ne doit laisser fuiter aucun faux module d'un test a l'autre."""
+    with pytest.MonkeyPatch.context() as inner_monkeypatch:
+        # Simule l'usage normal de la fixture dans un scope isole, puis
+        # verifie que son "finally" a bien nettoye tout module factice.
+        saved_path = list(sys.path)
+        saved_modules = {name: sys.modules[name] for name in list(sys.modules) if _is_dependency_module_name(name)}
+        for name in saved_modules:
+            del sys.modules[name]
+        try:
+            repo = _make_fake_repo(tmp_path, "mini_metopes", "leaktest")
+            _fake_loaded_module(inner_monkeypatch, "mini_metopes", repo)
+            assert "leaktest" in sys.modules["mini_metopes"].__file__
+        finally:
+            sys.path[:] = saved_path
+            for name in list(sys.modules):
+                if _is_dependency_module_name(name) and name not in saved_modules:
+                    del sys.modules[name]
+            sys.modules.update(saved_modules)
+
+    assert "mini_metopes" not in sys.modules or "leaktest" not in getattr(sys.modules["mini_metopes"], "__file__", "")

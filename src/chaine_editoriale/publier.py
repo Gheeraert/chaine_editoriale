@@ -135,7 +135,7 @@ def publier(
         media_directory,
         workspace_dir,
         output_dir,
-        pdf_export_requested=resolved_options.pdf_export_mode != "none",
+        latei_export_requested=resolved_options.pdf_export_mode != "none",
     )
 
     build_config = purh_site_api.BuildConfig(
@@ -156,6 +156,12 @@ def publier(
     latei_path = _existing_or_none(output_dir / "assets" / "generated" / "book.tex")
     pdf_path = _existing_or_none(output_dir / "assets" / "generated" / "book.pdf")
     pdf_status = _pdf_status(resolved_options.pdf_export_mode, pdf_path)
+
+    if media_layout:
+        # Repertoire HTML final : uniquement connu une fois SiteBuilder execute
+        # (voir prepare_media_layout_for_impressions pour la distinction entre
+        # repertoire source et repertoire final).
+        media_layout["html_output_directory"] = _existing_or_none(output_dir / "assets" / "images" / "media")
 
     manifest_path = workspace_dir / "publication.json"
     manifest = build_publication_manifest(
@@ -222,7 +228,7 @@ def prepare_media_layout_for_impressions(
     workspace_dir: Path,
     output_dir: Path,
     *,
-    pdf_export_requested: bool,
+    latei_export_requested: bool,
 ) -> tuple[Path | None, dict[str, Path | None]]:
     """Placer les medias intermediaires aux emplacements reellement lus par Impressions.
 
@@ -233,14 +239,19 @@ def prepare_media_layout_for_impressions(
 
     1. **HTML** (``purh_site.site_builder`` + ``resources/tei_to_html.xsl``) :
        ``SiteBuilder`` copie tel quel le contenu de ``BuildConfig.assets_dir``
-       sous ``output_dir/assets/`` (``_copy_user_assets``), et le fragment
-       XSLT prefixe toute URL ne commencant pas deja par ``assets/`` avec
-       ``assets/images/`` (template ``resolved-image-src``). La reference
-       HTML reelle est donc ``assets/images/media/<sha256><ext>`` : il faut
-       placer les medias sous ``assets_dir/images/media/``.
+       (le repertoire *source* prepare ici) sous ``output_dir/assets/``
+       (``_copy_user_assets``), et le fragment XSLT prefixe toute URL ne
+       commencant pas deja par ``assets/`` avec ``assets/images/`` (template
+       ``resolved-image-src``). La reference HTML reelle est donc
+       ``assets/images/media/<sha256><ext>`` : il faut placer les medias sous
+       ``assets_dir/images/media/`` (repertoire *source*, transmis a
+       ``BuildConfig.assets_dir``) pour qu'ils soient copies par
+       ``SiteBuilder`` sous ``output_dir/assets/images/media/`` (repertoire
+       *final* du site, uniquement connu une fois ``SiteBuilder`` execute).
 
     2. **LaTEI/PDF** (``purh_site.latei_assets.package_latei_graphics``,
-       appele par ``purh_site.site_builder._build_pdf_site_artifacts``) :
+       appele par ``purh_site.site_builder._build_pdf_site_artifacts``, et ce
+       des que ``pdf_export_mode`` vaut ``"latei"`` ou ``"latei_pdf"``) :
        cette etape resout chaque ``@url`` **relativement au dossier du
        fichier TEI source** passe a l'export reversible, qui est toujours
        ``output_dir/book.normalized.xml`` pour le pipeline site — donc
@@ -249,18 +260,22 @@ def prepare_media_layout_for_impressions(
        (avertissement dans le rapport, aucune erreur) et la figure est
        remplacee dans le PDF par un encadre "Image absente ou non fournie"
        (voir ``purh_site.latei_driver`` / macro LaTeX
-       ``\\latei_figure_fallback:``).
+       ``\\latei_figure_fallback:``). C'est le repertoire de *resolution
+       initiale* de LaTEI, distinct des deux precedents.
 
-    Ces deux resolutions ne peuvent pas etre satisfaites par un seul
-    emplacement sans modifier Impressions (voir le rapport de passe pour la
-    proposition de correction upstream). Cette fonction documente donc
-    explicitement les deux copies necessaires, chacune protegee par un test
+    Ces trois repertoires (source HTML, final HTML, source LaTEI) ne peuvent
+    pas etre unifies sans modifier Impressions (voir le rapport de passe
+    pour la proposition de correction upstream). Cette fonction documente
+    donc explicitement les copies necessaires, chacune protegee par un test
     d'integration distinct, plutot que de dupliquer implicitement la copie
     dans le corps de ``publier()``.
 
     Retourne l'``assets_dir`` a transmettre a ``BuildConfig`` (ou ``None``
     en l'absence de media) et un dictionnaire de diagnostic destine au
-    manifeste (``media_layout``).
+    manifeste (``media_layout``), avec les cles ``source_media_directory``,
+    ``html_assets_source_directory`` et ``latei_source_directory``. La cle
+    ``html_output_directory`` (repertoire final, connu seulement apres
+    ``SiteBuilder``) est ajoutee par l'appelant.
     """
     if media_directory is None:
         return None, {}
@@ -273,16 +288,16 @@ def prepare_media_layout_for_impressions(
         raise AssetPreparationError(f"lecture du dossier de medias impossible : {media_directory}", cause=error) from error
 
     assets_root = workspace_dir / "impressions-assets"
-    html_media_dir = assets_root / "images" / "media"
-    _copy_media_tree(source_files, html_media_dir)
+    html_assets_source_dir = assets_root / "images" / "media"
+    _copy_media_tree(source_files, html_assets_source_dir)
 
     media_layout: dict[str, Path | None] = {
         "source_media_directory": media_directory,
-        "html_media_directory": html_media_dir,
-        "latei_media_directory": None,
+        "html_assets_source_directory": html_assets_source_dir,
+        "latei_source_directory": None,
     }
 
-    if pdf_export_requested:
+    if latei_export_requested:
         # Contournement minimal et documente pour purh_site.latei_assets :
         # voir la docstring ci-dessus. output_dir n'existe pas forcement
         # encore a ce stade (SiteBuilder le cree normalement lui-meme).
@@ -290,9 +305,9 @@ def prepare_media_layout_for_impressions(
             output_dir.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             raise AssetPreparationError(f"preparation du dossier de sortie impossible : {output_dir}", cause=error) from error
-        latei_media_dir = output_dir / "media"
-        _copy_media_tree(source_files, latei_media_dir)
-        media_layout["latei_media_directory"] = latei_media_dir
+        latei_source_dir = output_dir / "media"
+        _copy_media_tree(source_files, latei_source_dir)
+        media_layout["latei_source_directory"] = latei_source_dir
 
     return assets_root, media_layout
 
