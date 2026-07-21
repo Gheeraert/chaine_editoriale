@@ -23,6 +23,7 @@ CONFIG_SCHEMA_NAME = "chaine-editoriale-config"
 CONFIG_SCHEMA_VERSION = 1
 
 ConfigIssueSeverity = Literal["error", "warning"]
+DependencyState = Literal["success", "restart_required", "error"]
 
 # (nom du paquet Python, dependance decrite)
 _DEPENDENCY_PACKAGES: tuple[tuple[str, str], ...] = (
@@ -72,8 +73,20 @@ class DependencyCheck:
     configured_repository: Path
     import_root: Path | None
     module_path: Path | None
-    success: bool
+    state: DependencyState
     message: str
+
+    @property
+    def success(self) -> bool:
+        return self.state == "success"
+
+    @property
+    def can_be_saved(self) -> bool:
+        return self.state in {"success", "restart_required"}
+
+    @property
+    def restart_required(self) -> bool:
+        return self.state == "restart_required"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +99,14 @@ class DependencyVerification:
     @property
     def success(self) -> bool:
         return self.mini_metopes.success and self.purh_site.success
+
+    @property
+    def can_be_saved(self) -> bool:
+        return self.mini_metopes.can_be_saved and self.purh_site.can_be_saved
+
+    @property
+    def restart_required(self) -> bool:
+        return self.can_be_saved and not self.success
 
 
 def default_config_path() -> Path:
@@ -195,15 +216,15 @@ def verify_config(config: ChaineConfig) -> DependencyVerification:
 
 def _verify_repository_structure(package_name: str, repository_path: Path) -> DependencyCheck:
     if not repository_path.exists():
-        return DependencyCheck(package_name, repository_path, None, None, False, f"dossier introuvable : {repository_path}")
+        return DependencyCheck(package_name, repository_path, None, None, "error", f"dossier introuvable : {repository_path}")
     if not repository_path.is_dir():
-        return DependencyCheck(package_name, repository_path, None, None, False, f"le chemin n'est pas un dossier : {repository_path}")
+        return DependencyCheck(package_name, repository_path, None, None, "error", f"le chemin n'est pas un dossier : {repository_path}")
     if not (repository_path / "pyproject.toml").is_file():
-        return DependencyCheck(package_name, repository_path, None, None, False, f"le dossier ne ressemble pas a un depot Python (pyproject.toml absent) : {repository_path}")
+        return DependencyCheck(package_name, repository_path, None, None, "error", f"le dossier ne ressemble pas a un depot Python (pyproject.toml absent) : {repository_path}")
     import_root = _detect_import_root(repository_path, package_name)
     if import_root is None:
-        return DependencyCheck(package_name, repository_path, None, None, False, f"paquet {package_name} introuvable sous {repository_path}")
-    return DependencyCheck(package_name, repository_path, import_root, None, True, f"structure valide, racine d'import {import_root}")
+        return DependencyCheck(package_name, repository_path, None, None, "error", f"paquet {package_name} introuvable sous {repository_path}")
+    return DependencyCheck(package_name, repository_path, import_root, None, "success", f"structure valide, racine d'import {import_root}")
 
 
 def _detect_import_root(repository_path: Path, package_name: str) -> Path | None:
@@ -237,11 +258,11 @@ def _activate_dependency(structural_check: DependencyCheck) -> DependencyCheck:
     import_root = structural_check.import_root
     resolved_import_root = import_root.resolve()
 
+    _prioritize_sys_path_entry(import_root)
+
     existing_module = sys.modules.get(package_name)
     if existing_module is not None:
         return _check_already_loaded_module(structural_check, existing_module, resolved_import_root)
-
-    _ensure_sys_path_entry(import_root)
 
     try:
         module = importlib.import_module(package_name)
@@ -251,7 +272,7 @@ def _activate_dependency(structural_check: DependencyCheck) -> DependencyCheck:
             structural_check.configured_repository,
             import_root,
             None,
-            False,
+            "error",
             f"le module {package_name} n'a pas pu etre importe depuis {import_root} : {error}",
         )
 
@@ -266,19 +287,19 @@ def _check_already_loaded_module(
         module_file = Path(inspect.getfile(module))  # type: ignore[arg-type]
     except (TypeError, OSError):
         return DependencyCheck(
-            package_name, structural_check.configured_repository, structural_check.import_root, None, False,
+            package_name, structural_check.configured_repository, structural_check.import_root, None, "error",
             f"module {package_name} deja charge mais son emplacement ne peut pas etre determine",
         )
     if not _is_under(module_file, resolved_import_root):
         return DependencyCheck(
-            package_name, structural_check.configured_repository, structural_check.import_root, module_file, False,
+            package_name, structural_check.configured_repository, structural_check.import_root, module_file, "restart_required",
             (
                 f"une autre version de {package_name} est deja chargee depuis {module_file}. "
                 "Enregistrez la nouvelle configuration puis redemarrez l'application."
             ),
         )
     return DependencyCheck(
-        package_name, structural_check.configured_repository, structural_check.import_root, module_file, True,
+        package_name, structural_check.configured_repository, structural_check.import_root, module_file, "success",
         f"deja charge et coherent avec le depot configure : {module_file}",
     )
 
@@ -291,19 +312,19 @@ def _check_resolved_module(
         module_file = Path(inspect.getfile(module))  # type: ignore[arg-type]
     except (TypeError, OSError) as error:
         return DependencyCheck(
-            package_name, structural_check.configured_repository, structural_check.import_root, None, False,
+            package_name, structural_check.configured_repository, structural_check.import_root, None, "error",
             f"emplacement du module {package_name} indetermine : {error}",
         )
     if not _is_under(module_file, resolved_import_root):
         return DependencyCheck(
-            package_name, structural_check.configured_repository, structural_check.import_root, module_file, False,
+            package_name, structural_check.configured_repository, structural_check.import_root, module_file, "error",
             (
                 f"conflit de resolution : {package_name} importe depuis {module_file} "
                 f"au lieu du depot configure ({structural_check.configured_repository})"
             ),
         )
     return DependencyCheck(
-        package_name, structural_check.configured_repository, structural_check.import_root, module_file, True,
+        package_name, structural_check.configured_repository, structural_check.import_root, module_file, "success",
         f"module {package_name} resolu depuis {module_file}",
     )
 
@@ -316,16 +337,26 @@ def _is_under(candidate: Path, root: Path) -> bool:
         return False
 
 
-def _ensure_sys_path_entry(path: Path) -> None:
-    """Inserer path en tete de sys.path sans y introduire de doublon resolu."""
-    resolved = str(path.resolve())
-    for existing in sys.path:
-        try:
-            if Path(existing).resolve() == Path(resolved):
-                return
-        except OSError:
-            continue
-    sys.path.insert(0, resolved)
+def _prioritize_sys_path_entry(path: Path) -> None:
+    """Garantir que path occupe la position 0 de sys.path, sans doublon equivalent.
+
+    Retire d'abord toute occurrence de sys.path resolue vers le meme chemin
+    (ou illisible), puis insere path en tete. Le chemin configure est ainsi
+    toujours prioritaire face a une autre installation du meme paquet
+    presente ailleurs dans sys.path.
+    """
+    resolved = path.resolve()
+    remaining = [entry for entry in sys.path if not _same_resolved_path(entry, resolved)]
+    sys.path[:] = [str(resolved)] + remaining
+
+
+def _same_resolved_path(entry: str, resolved: Path) -> bool:
+    if not entry:
+        return False
+    try:
+        return Path(entry).resolve() == resolved
+    except OSError:
+        return False
 
 
 def today_iso() -> str:

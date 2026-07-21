@@ -14,6 +14,8 @@ from typing import Any
 
 from .configuration import activate_configured_dependencies, load_config
 from .erreurs import (
+    AssetPreparationError,
+    ChecksumError,
     DependencyVerificationError,
     InvalidMetadataError,
     SiteBuildError,
@@ -152,14 +154,13 @@ def publier(
 
     manifest_path = workspace_dir / "publication.json"
     manifest = build_publication_manifest(
-        workspace_dir=workspace_dir,
-        output_dir=output_dir,
+        manifest_dir=manifest_path.parent,
         docx_path=docx_path,
-        docx_sha256=mini_metopes_api.compute_file_sha256(docx_path),
+        docx_sha256=_compute_sha256(mini_metopes_api, docx_path),
         metadata_path=metadata_path,
-        metadata_sha256=mini_metopes_api.compute_file_sha256(metadata_path),
+        metadata_sha256=_compute_sha256(mini_metopes_api, metadata_path),
         tei_path=tei_path,
-        tei_sha256=mini_metopes_api.compute_file_sha256(tei_path),
+        tei_sha256=_compute_sha256(mini_metopes_api, tei_path),
         media_directory=media_directory,
         options=resolved_options,
         outputs={
@@ -193,8 +194,17 @@ def _existing_or_none(path: Path | None) -> Path | None:
     return path if path.exists() else None
 
 
+def _compute_sha256(mini_metopes_api: _MiniMetopesApi, path: Path) -> str:
+    """Encadrer le calcul d'empreinte : jamais d'erreur systeme brute a la frontiere publique."""
+    try:
+        return mini_metopes_api.compute_file_sha256(path)
+    except OSError as error:
+        raise ChecksumError(f"empreinte SHA-256 impossible a calculer : {path}", path=str(path), cause=error) from error
+
+
 def _pdf_status(pdf_export_mode: str, pdf_path: Path | None) -> str:
-    if pdf_export_mode == "none":
+    """``latei`` demande volontairement le LaTEI sans PDF : ce n'est jamais 'unavailable'."""
+    if pdf_export_mode in {"none", "latei"}:
         return "not_requested"
     if pdf_path is not None:
         return "generated"
@@ -202,36 +212,63 @@ def _pdf_status(pdf_export_mode: str, pdf_path: Path | None) -> str:
 
 
 def _preparer_assets_impressions(media_directory: Path | None, workspace_dir: Path) -> Path | None:
-    """Copier <media_directory> vers workspace/impressions-assets/media en preservant ce niveau.
+    """Copier <media_directory> vers workspace/impressions-assets en preservant le niveau media/.
 
     Impressions copie tel quel le contenu d'``assets_dir`` a la racine des
     assets du site ; passer directement le dossier ``media`` produit par
     Mini-Metopes supprimerait donc ce niveau. On construit ici une racine
-    d'assets intermediaire qui contient un unique sous-dossier ``media``.
+    d'assets intermediaire qui contient un sous-dossier ``media``.
+
+    Le fragment HTML genere par Impressions prefixe systematiquement toute
+    URL de graphic TEI qui ne commence pas deja par ``assets/`` avec
+    ``assets/images/`` (``resolved-image-src`` dans
+    ``tei_to_html.xsl``) ; comme la TEI Commons Publishing de Mini-Metopes
+    utilise toujours des URL ``media/<sha256><ext>``, la reference HTML
+    reelle est ``assets/images/media/...``. Les memes fichiers sont donc
+    egalement places sous ``images/media/`` afin que cette reference se
+    resolve reellement, sans dupliquer la logique de rendu d'Impressions ni
+    modifier son code.
     """
     if media_directory is None:
         return None
     if not media_directory.exists():
-        raise TeiWriteError(f"dossier de medias annonce mais introuvable : {media_directory}")
+        raise AssetPreparationError(f"dossier de medias annonce mais introuvable : {media_directory}")
 
     assets_root = workspace_dir / "impressions-assets"
-    destination = assets_root / "media"
-    destination.mkdir(parents=True, exist_ok=True)
-    for source_file in sorted(media_directory.iterdir()):
-        if not source_file.is_file():
-            continue
-        target_file = destination / source_file.name
-        if target_file.exists():
-            if not _files_identical(source_file, target_file):
-                raise TeiWriteError(
-                    f"conflit de media existant : {target_file} differe du contenu produit par Mini-Metopes"
-                )
-            continue
-        shutil.copy2(source_file, target_file)
+    try:
+        source_files = sorted(path for path in media_directory.iterdir() if path.is_file())
+    except OSError as error:
+        raise AssetPreparationError(f"lecture du dossier de medias impossible : {media_directory}", cause=error) from error
+
+    for relative_destination in ("media", "images/media"):
+        _copy_media_tree(source_files, assets_root / relative_destination)
     return assets_root
 
 
+def _copy_media_tree(source_files: list[Path], destination: Path) -> None:
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise AssetPreparationError(f"preparation des assets impossible : {destination}", cause=error) from error
+
+    for source_file in source_files:
+        target_file = destination / source_file.name
+        if target_file.exists():
+            if not _files_identical(source_file, target_file):
+                raise AssetPreparationError(
+                    f"conflit de media existant : {target_file} differe du contenu produit par Mini-Metopes"
+                )
+            continue
+        try:
+            shutil.copy2(source_file, target_file)
+        except OSError as error:
+            raise AssetPreparationError(f"copie de media impossible : {source_file} -> {target_file}", cause=error) from error
+
+
 def _files_identical(left: Path, right: Path) -> bool:
-    if left.stat().st_size != right.stat().st_size:
-        return False
-    return left.read_bytes() == right.read_bytes()
+    try:
+        if left.stat().st_size != right.stat().st_size:
+            return False
+        return left.read_bytes() == right.read_bytes()
+    except OSError as error:
+        raise AssetPreparationError(f"comparaison de medias impossible : {left} / {right}", cause=error) from error

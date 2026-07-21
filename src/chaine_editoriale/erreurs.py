@@ -62,6 +62,32 @@ class SiteBuildError(ChaineEditorialeError):
         self.__cause__ = cause
 
 
+class AssetPreparationError(ChaineEditorialeError):
+    """La preparation des assets (copie des medias vers impressions-assets) a echoue."""
+
+    def __init__(self, message: str, *, cause: BaseException | None = None) -> None:
+        super().__init__(message)
+        self.__cause__ = cause
+
+
+class ChecksumError(ChaineEditorialeError):
+    """Le calcul d'une empreinte SHA-256 a echoue pour un fichier attendu."""
+
+    def __init__(self, message: str, *, path: str | None = None, cause: BaseException | None = None) -> None:
+        super().__init__(message)
+        self.path = path
+        self.__cause__ = cause
+
+
+class ManifestWriteError(ChaineEditorialeError):
+    """L'ecriture de publication.json a echoue."""
+
+    def __init__(self, message: str, *, path: str | None = None, cause: BaseException | None = None) -> None:
+        super().__init__(message)
+        self.path = path
+        self.__cause__ = cause
+
+
 @dataclass(frozen=True, slots=True)
 class DiagnosticSnapshot:
     """Representation texte stable d'un diagnostic externe, pour affichage."""

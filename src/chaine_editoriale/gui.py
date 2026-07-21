@@ -42,6 +42,7 @@ class ConfigController:
     purh_site_path: str = ""
     config_path: Path | None = None
     verification: DependencyVerification | None = None
+    startup_warning: str | None = None
     _verified_for: tuple[str, str] | None = None
 
     def set_mini_metopes_path(self, value: str) -> None:
@@ -68,18 +69,22 @@ class ConfigController:
         return self.verification
 
     def can_save(self) -> bool:
-        """Le bouton Enregistrer n'est actif que pour une verification reussie et a jour."""
-        if self.verification is None or not self.verification.success:
+        """Le bouton Enregistrer accepte un succes complet ou un redemarrage requis, jamais une erreur."""
+        if self.verification is None or not self.verification.can_be_saved:
             return False
         return self._verified_for == (self.mini_metopes_path, self.purh_site_path)
 
     def save(self, path: Path | None = None) -> Path:
         if not self.can_save():
             raise RuntimeError("la configuration doit etre verifiee avec succes avant d'etre enregistree")
+        assert self.verification is not None
+        # Un redemarrage requis empeche de garantir que la resolution reussie
+        # decrit encore l'etat reel du process : last_verified reste null.
+        last_verified = today_iso() if self.verification.success else None
         config = ChaineConfig(
             mini_metopes_path=Path(self.mini_metopes_path),
             purh_site_path=Path(self.purh_site_path),
-            last_verified=today_iso(),
+            last_verified=last_verified,
         )
         return write_config(config, path if path is not None else self.config_path)
 
@@ -88,9 +93,10 @@ class ConfigController:
         if self.verification is None:
             return ""
         lines: list[str] = []
+        state_labels = {"success": "OK", "restart_required": "REDEMARRAGE REQUIS", "error": "ECHEC"}
         for check in (self.verification.mini_metopes, self.verification.purh_site):
             label = "Mini-Metopes" if check.dependency_name == "mini_metopes" else "Impressions"
-            lines.append(f"{label} : {'OK' if check.success else 'ECHEC'}")
+            lines.append(f"{label} : {state_labels[check.state]}")
             lines.append(f"Depot : {check.configured_repository}")
             if check.import_root is not None:
                 lines.append(f"Racine d'import : {check.import_root}")
@@ -100,6 +106,17 @@ class ConfigController:
                 lines.append(check.message)
             lines.append("")
         return "\n".join(lines).rstrip()
+
+    def post_save_message(self) -> str:
+        """Message a afficher juste apres un enregistrement reussi."""
+        assert self.verification is not None
+        if self.verification.success:
+            return "Mini-Metopes et Impressions sont configures.\nLa chaine editoriale est prete."
+        return (
+            "La nouvelle configuration a ete enregistree.\n\n"
+            "Une autre version de Mini-Metopes ou d'Impressions est encore chargee en memoire.\n"
+            "Redemarrez la Chaine editoriale pour utiliser les nouveaux chemins."
+        )
 
 
 def startup_screen(config_path: Path | None = None) -> tuple[str, ConfigController]:
@@ -118,6 +135,10 @@ def startup_screen(config_path: Path | None = None) -> tuple[str, ConfigControll
     controller.verification = verification
     controller._verified_for = (controller.mini_metopes_path, controller.purh_site_path)
     if verification.success:
+        try:
+            write_config(ChaineConfig(config.mini_metopes_path, config.purh_site_path, last_verified=today_iso()), resolved_path)
+        except Exception as error:  # noqa: BLE001 - avertissement seulement, la resolution reste un succes reel.
+            controller.startup_warning = f"date de derniere verification non mise a jour : {error}"
         return "main", controller
     return "config", controller
 
@@ -142,7 +163,17 @@ def run_gui() -> None:
             text="Mini-Metopes et Impressions sont configures.\nLa chaine editoriale est prete.",
             justify="left",
         ).pack(anchor="w")
+        if controller.startup_warning:
+            tk.Label(frame, text=controller.startup_warning, justify="left", fg="#a15c00").pack(anchor="w", pady=(4, 0))
         tk.Button(frame, text="Configurer les dependances...", command=show_config_screen).pack(anchor="w", pady=(12, 0))
+
+    def show_restart_required_screen() -> None:
+        for child in root.winfo_children():
+            child.destroy()
+        frame = tk.Frame(root, padx=16, pady=16)
+        frame.pack(fill="both", expand=True)
+        tk.Label(frame, text=controller.post_save_message(), justify="left").pack(anchor="w")
+        tk.Button(frame, text="Fermer", command=root.destroy).pack(anchor="w", pady=(12, 0))
 
     def show_config_screen() -> None:
         for child in root.winfo_children():
@@ -181,8 +212,17 @@ def run_gui() -> None:
         def on_save() -> None:
             if not controller.can_save():
                 return
+            assert controller.verification is not None
+            fully_active = controller.verification.success
             controller.save()
-            show_main_screen()
+            if fully_active:
+                show_main_screen()
+            else:
+                # Un redemarrage est necessaire : ne jamais afficher l'ecran
+                # principal comme si les nouvelles dependances etaient deja
+                # actives, et ne pas tenter de decharger/reimporter les
+                # paquets deja charges depuis un autre emplacement.
+                show_restart_required_screen()
 
         tk.Label(frame, text="Depot Mini-Metopes").grid(row=0, column=0, sticky="w")
         tk.Entry(frame, textvariable=mini_metopes_var, width=50).grid(row=0, column=1, sticky="we")

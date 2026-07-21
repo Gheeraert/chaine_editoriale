@@ -1,0 +1,14 @@
+.venv/
+.idea/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Artefacts de publication generes localement (non des fixtures de test)
+/workspace/
+/output/
+publication.json
+config_chaine.json

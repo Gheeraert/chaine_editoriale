@@ -1,13 +1,13 @@
 {
   "schema_version": "1.0",
   "source_document": {
-    "path": "document_minimal.docx",
-    "sha256": "ee449cbf3dc04ceaeb8677b723d537e4527e3b0c0f9c2f634f90bff4cbc20738"
+    "path": "document_avec_image.docx",
+    "sha256": "784a2434cc4a89bec9cc0cc13fa3c814e766f8db1fe96c46adff3b8682b25bd8"
   },
   "document": {
     "type": "chapter",
     "language": "fr",
-    "title": "Document minimal",
+    "title": "Document avec image",
     "subtitle": null
   },
   "contributors": [

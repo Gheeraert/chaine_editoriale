@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -211,9 +212,117 @@ def test_activate_is_idempotent_and_deduplicates_sys_path(real_repos: tuple[Path
     after = list(sys.path)
     assert verification.success
     assert before == after
-    assert len(after) == len(set(Path(p).resolve() for p in after)) or True  # aucune insertion supplementaire
-    resolved_import_root = str(Path(mini_metopes_path, "src").resolve())
-    assert sum(1 for entry in after if Path(entry).resolve() == Path(resolved_import_root)) <= 1
+    resolved_entries = [Path(entry).resolve() for entry in after if entry]
+    mini_metopes_root = Path(mini_metopes_path, "src").resolve()
+    purh_site_root = Path(purh_site_path).resolve()
+    assert sum(1 for entry in resolved_entries if entry == mini_metopes_root) == 1
+    assert sum(1 for entry in resolved_entries if entry == purh_site_root) == 1
+
+
+# ---------------------------------------------------------------------------
+# Priorite de la racine configuree dans sys.path (_prioritize_sys_path_entry)
+
+
+@pytest.fixture
+def restore_sys_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "path", list(sys.path))
+
+
+def test_prioritize_sys_path_inserts_at_head(tmp_path: Path, restore_sys_path: None) -> None:
+    target = tmp_path / "root"
+    target.mkdir()
+    sys.path[:] = [r"C:\autre", r"C:\encore-autre"]
+    cfg._prioritize_sys_path_entry(target)
+    assert sys.path[0] == str(target.resolve())
+
+
+def test_prioritize_sys_path_moves_existing_entry_to_head(tmp_path: Path, restore_sys_path: None) -> None:
+    target = tmp_path / "root"
+    target.mkdir()
+    sys.path[:] = [r"C:\autre", str(target), r"C:\encore-autre"]
+    cfg._prioritize_sys_path_entry(target)
+    assert sys.path == [str(target.resolve()), r"C:\autre", r"C:\encore-autre"]
+
+
+def test_prioritize_sys_path_removes_equivalent_duplicates(tmp_path: Path, restore_sys_path: None) -> None:
+    target = tmp_path / "root"
+    target.mkdir()
+    sys.path[:] = [str(target), r"C:\autre", str(target) + os.sep, r"C:\encore-autre"]
+    cfg._prioritize_sys_path_entry(target)
+    resolved_target = str(target.resolve())
+    assert sys.path.count(resolved_target) == 1
+    assert sys.path[0] == resolved_target
+
+
+def test_prioritize_sys_path_stable_order_after_two_activations(tmp_path: Path, restore_sys_path: None) -> None:
+    target = tmp_path / "root"
+    target.mkdir()
+    sys.path[:] = [r"C:\autre", r"C:\encore-autre"]
+    cfg._prioritize_sys_path_entry(target)
+    first = list(sys.path)
+    cfg._prioritize_sys_path_entry(target)
+    second = list(sys.path)
+    assert first == second
+
+
+def test_prioritize_sys_path_does_not_grow_on_repeated_activation(tmp_path: Path, restore_sys_path: None) -> None:
+    target = tmp_path / "root"
+    target.mkdir()
+    sys.path[:] = [r"C:\autre"]
+    length_before = len(sys.path)
+    cfg._prioritize_sys_path_entry(target)
+    cfg._prioritize_sys_path_entry(target)
+    cfg._prioritize_sys_path_entry(target)
+    assert len(sys.path) == length_before + 1
+
+
+def test_prioritize_sys_path_robust_to_unresolvable_entries(tmp_path: Path, restore_sys_path: None) -> None:
+    target = tmp_path / "root"
+    target.mkdir()
+    sys.path[:] = ["", r"C:\autre", "\x00invalid"]
+    cfg._prioritize_sys_path_entry(target)
+    assert sys.path[0] == str(target.resolve())
+
+
+# ---------------------------------------------------------------------------
+# Modele d'etat des dependances (success / restart_required / error)
+
+
+def _check(state: cfg.DependencyState, name: str = "mini_metopes") -> cfg.DependencyCheck:
+    return cfg.DependencyCheck(name, Path("C:/repo"), Path("C:/repo/src"), Path("C:/repo/src/pkg/__init__.py"), state, "message")
+
+
+def test_dependency_verification_both_success() -> None:
+    verification = cfg.DependencyVerification(_check("success", "mini_metopes"), _check("success", "purh_site"))
+    assert verification.success
+    assert verification.can_be_saved
+    assert not verification.restart_required
+
+
+def test_dependency_verification_one_restart_required() -> None:
+    verification = cfg.DependencyVerification(_check("restart_required", "mini_metopes"), _check("success", "purh_site"))
+    assert not verification.success
+    assert verification.can_be_saved
+    assert verification.restart_required
+
+
+def test_dependency_verification_both_restart_required() -> None:
+    verification = cfg.DependencyVerification(_check("restart_required", "mini_metopes"), _check("restart_required", "purh_site"))
+    assert not verification.success
+    assert verification.can_be_saved
+    assert verification.restart_required
+
+
+def test_dependency_verification_one_error_blocks_save() -> None:
+    verification = cfg.DependencyVerification(_check("error", "mini_metopes"), _check("success", "purh_site"))
+    assert not verification.success
+    assert not verification.can_be_saved
+    assert not verification.restart_required
+
+
+def test_dependency_verification_error_with_restart_required_blocks_save() -> None:
+    verification = cfg.DependencyVerification(_check("error", "mini_metopes"), _check("restart_required", "purh_site"))
+    assert not verification.can_be_saved
 
 
 def test_activate_detects_conflict_with_already_loaded_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_repos: tuple[Path, Path]) -> None:
@@ -229,7 +338,13 @@ def test_activate_detects_conflict_with_already_loaded_module(tmp_path: Path, mo
     config = cfg.ChaineConfig(mini_metopes_path=other_repo, purh_site_path=purh_site_path)
     verification = cfg.activate_configured_dependencies(config)
     assert not verification.mini_metopes.success
-    assert "deja chargee" in verification.mini_metopes.message or "redemarrez" in verification.mini_metopes.message
+    assert verification.mini_metopes.state == "restart_required"
+    assert verification.mini_metopes.restart_required
+    assert verification.mini_metopes.can_be_saved
+    assert not verification.success
+    assert verification.can_be_saved
+    assert verification.restart_required
+    assert "redemarrez" in verification.mini_metopes.message.lower()
 
 
 def test_activate_returns_structured_result_without_raw_import_error(tmp_path: Path) -> None:
