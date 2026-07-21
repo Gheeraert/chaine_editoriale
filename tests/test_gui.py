@@ -258,3 +258,260 @@ def test_startup_screen_first_launch_without_config_shows_config_screen(tmp_path
     assert screen == "config"
     assert controller.verification is None
     assert controller.can_save() is False
+
+
+# ---------------------------------------------------------------------------
+# Mecanisme de restauration de la configuration active (objectif 4)
+#
+# Le bouton "Retour a la publication" vit dans une fermeture imbriquee de
+# run_gui() (qui bloque sur root.mainloop()) et n'est pas accessible
+# isolement sans reecrire cette architecture. Le test ci-dessous protege
+# directement le mecanisme d'instantane/restauration que gui.on_cancel_return
+# applique aux memes attributs de ConfigController ; le cablage reel du
+# bouton est verifie par inspection visuelle manuelle (voir le rapport de
+# passe).
+
+
+def test_config_controller_snapshot_and_restore_discards_unverified_changes() -> None:
+    controller = gui.ConfigController("C:/a", "C:/b", config_path=Path("unused"))
+    controller.verification = _verification("success", "success")
+    controller._verified_for = ("C:/a", "C:/b")
+
+    # Instantane pris a l'ouverture de l'ecran de configuration, comme le fait show_config_screen.
+    snapshot = (controller.mini_metopes_path, controller.purh_site_path, controller.verification, controller._verified_for)
+
+    controller.set_mini_metopes_path("C:/changed-but-not-saved")
+    assert controller.verification is None  # invalide par la modification du champ
+
+    # Restauration comme le fait on_cancel_return, sans reverification ni enregistrement.
+    controller.mini_metopes_path, controller.purh_site_path, controller.verification, controller._verified_for = snapshot
+
+    assert controller.mini_metopes_path == "C:/a"
+    assert controller.purh_site_path == "C:/b"
+    assert controller.verification is not None and controller.verification.success
+    assert controller.can_save() is True
+
+
+# ---------------------------------------------------------------------------
+# Tests sur de vrais widgets Tkinter (defauts reellement rencontres)
+
+
+def _widgets_by_class(widget, class_name: str) -> list:
+    found = []
+    for child in widget.winfo_children():
+        if child.winfo_class() == class_name:
+            found.append(child)
+        found.extend(_widgets_by_class(child, class_name))
+    return found
+
+
+@pytest.fixture(scope="module")
+def tk_root():
+    """Une seule racine Tk partagee par les tests de ce module.
+
+    Creer un ``tk.Tk()`` distinct par test (ou une racine "sonde" jetable en
+    plus de la racine reelle) s'est revele source de plantages Tcl
+    intermittents ("Can't find a usable init.tcl") sur cette machine
+    lorsque plusieurs interpretes Tcl sont crees/detruits en rafale dans le
+    meme processus. Une seule racine reelle est donc creee ici ; si Tk est
+    reellement indisponible, la creation echoue et le module est ignore
+    proprement pour tous ses tests. Chaque test nettoie les widgets enfants
+    avant de construire son propre ecran.
+    """
+    import tkinter as tk
+
+    try:
+        root = tk.Tk()
+    except Exception as error:  # noqa: BLE001 - environnement sans affichage : ignorer proprement.
+        pytest.skip(f"Tk indisponible sur cette machine : {error}")
+    yield root
+    root.destroy()
+
+
+def test_publication_screen_latex_engine_field_survives_rebuild(tk_root) -> None:
+    from chaine_editoriale import interface_publication as ip
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update_idletasks()
+    root.update()
+    combos = _widgets_by_class(root, "TCombobox")
+    assert len(combos) == 2
+    assert combos[1].get() == "LuaLaTeX"
+
+    for child in list(root.winfo_children()):
+        child.destroy()
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update_idletasks()
+    root.update()
+    combos_after_rebuild = _widgets_by_class(root, "TCombobox")
+    assert combos_after_rebuild[1].get() == "LuaLaTeX"
+
+
+def test_publication_screen_uses_the_controller_it_is_given(tk_root) -> None:
+    from chaine_editoriale import interface_publication as ip
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.docx_path = "C:/deja-saisi.docx"
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+    entries = _widgets_by_class(root, "TEntry")
+    assert entries[0].get() == "C:/deja-saisi.docx"
+
+
+def test_publication_screen_syncs_form_state_before_opening_config(tk_root) -> None:
+    """Ouvrir "Configurer les dependances..." doit reporter la saisie visible dans form_state avant de detruire les widgets."""
+    from chaine_editoriale import interface_publication as ip
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    opened: list[bool] = []
+    controller = ip.PublicationScreenController()
+    gui._build_publication_screen(root, controller, lambda: opened.append(True))
+    root.update()
+    entries = _widgets_by_class(root, "TEntry")
+    entries[0].insert(0, "C:/mon-document.docx")
+    entries[2].insert(0, "C:/mon-workspace")
+    root.update()
+
+    config_button = next(
+        button for button in _widgets_by_class(root, "TButton") if button.cget("text") == "Configurer les dépendances…"
+    )
+    config_button.invoke()
+
+    assert opened == [True]
+    assert controller.form_state.docx_path == "C:/mon-document.docx"
+    assert controller.form_state.workspace_dir == "C:/mon-workspace"
+
+    # Rebâtir l'ecran (comme le ferait le retour a la publication) :
+    # les valeurs saisies doivent reapparaitre dans les widgets.
+    for child in list(root.winfo_children()):
+        child.destroy()
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+    entries_after_rebuild = _widgets_by_class(root, "TEntry")
+    assert entries_after_rebuild[0].get() == "C:/mon-document.docx"
+    assert entries_after_rebuild[2].get() == "C:/mon-workspace"
+
+
+def test_publication_screen_busy_state_never_lost_across_rebuild(tk_root) -> None:
+    from chaine_editoriale import interface_publication as ip
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.begin_publication()
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+    assert controller.busy is True
+    for child in list(root.winfo_children()):
+        child.destroy()
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+    assert controller.busy is True
+    controller.end_publication()
+
+
+def test_publication_screen_artifact_buttons_span_multiple_rows(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Protege l'objectif 6 : jusqu'a sept boutons ne doivent jamais rester sur une seule ligne."""
+    import time
+    from tkinter import messagebox
+
+    from chaine_editoriale import interface_publication as ip
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    fake_result = _fake_publication_result(tmp_path, output_dir)
+
+    monkeypatch.setattr(ip, "run_publication_job", lambda request: ip.PublicationJobEvent(kind="success", result=fake_result))
+    # output_dir contient deja les artefacts factices : la confirmation
+    # "dossier non vide" est reelle et bloquante ; on l'auto-confirme ici,
+    # ce comportement etant deja couvert separement par les tests purs de
+    # directory_is_non_empty()/validate_publication_form().
+    monkeypatch.setattr(messagebox, "askyesno", lambda *args, **kwargs: True)
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    docx_path = tmp_path / "doc.docx"
+    docx_path.write_bytes(b"fake")
+    metadata_path = tmp_path / "doc.json"
+    metadata_path.write_text("{}", encoding="utf-8")
+    entries[0].insert(0, str(docx_path))
+    entries[1].insert(0, str(metadata_path))
+    entries[2].insert(0, str(tmp_path / "ws"))
+    entries[3].insert(0, str(output_dir))
+    root.update()
+
+    publish_button = next(button for button in _widgets_by_class(root, "TButton") if button.cget("text") == "Publier")
+    publish_button.invoke()
+
+    deadline = time.time() + 5
+    while controller.busy and time.time() < deadline:
+        root.update()
+        time.sleep(0.02)
+    assert not controller.busy
+
+    artifact_buttons = [
+        button for button in _widgets_by_class(root, "TButton") if button.cget("text").startswith("Ouvrir")
+    ]
+    assert len(artifact_buttons) >= 3
+    rows = {int(button.grid_info()["row"]) for button in artifact_buttons}
+    assert len(rows) >= 2, "les boutons d'ouverture doivent occuper plusieurs lignes de la grille"
+    columns = {int(button.grid_info()["column"]) for button in artifact_buttons}
+    assert columns == {0, 1}
+
+
+def _fake_publication_result(tmp_path: Path, output_dir: Path):
+    from dataclasses import dataclass
+
+    from chaine_editoriale.modeles import PublicationResult
+
+    @dataclass
+    class _FakeBuildResult:
+        output_dir: Path
+        html_path: Path
+        normalized_tei_path: Path | None
+        report_path: Path
+
+    html_path = output_dir / "index.html"
+    html_path.write_text("<html></html>", encoding="utf-8")
+    normalized_tei_path = output_dir / "book.normalized.xml"
+    normalized_tei_path.write_text("<TEI/>", encoding="utf-8")
+    report_path = output_dir / "build_report.txt"
+    report_path.write_text("rapport", encoding="utf-8")
+    xml_path = tmp_path / "ws" / "source" / "document.xml"
+    xml_path.parent.mkdir(parents=True, exist_ok=True)
+    xml_path.write_text("<TEI/>", encoding="utf-8")
+    latei_path = output_dir / "assets" / "generated" / "book.tex"
+    latei_path.parent.mkdir(parents=True, exist_ok=True)
+    latei_path.write_text("% latei", encoding="utf-8")
+    manifest_path = tmp_path / "ws" / "publication.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    return PublicationResult(
+        xml_path=xml_path,
+        media_directory=None,
+        assets_root=None,
+        site_result=_FakeBuildResult(output_dir, html_path, normalized_tei_path, report_path),
+        latei_path=latei_path,
+        pdf_path=None,
+        pdf_status="not_requested",
+        manifest_path=manifest_path,
+        conversion_diagnostics=(),
+    )

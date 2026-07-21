@@ -13,7 +13,6 @@ active les dependances avant tout import metier).
 
 from __future__ import annotations
 
-import queue
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -154,20 +153,24 @@ def startup_screen(config_path: Path | None = None) -> tuple[str, ConfigControll
     return "config", controller
 
 
-def _build_publication_screen(root, open_config_screen) -> "ip.PublicationScreenController":
-    """Construire l'ecran de publication (un document a la fois).
+def _build_publication_screen(
+    root, publication_controller: ip.PublicationScreenController, open_config_screen
+) -> None:
+    """Construire l'ecran de publication (un document a la fois) autour d'un controleur partage.
 
     Toute la logique (validation, requete, worker, formatage, etat occupe)
     vit dans ``interface_publication`` et reste testable sans Tk ; cette
     fonction ne fait qu'assembler des widgets ``ttk`` autour de ces
-    fonctions/objets purs. Le controleur retourne permet a ``run_gui()`` de
-    refuser de fermer la fenetre pendant une publication en cours.
+    fonctions/objets purs. ``publication_controller`` est cree une seule
+    fois pour toute la session par ``run_gui()`` : reconstruire cet ecran
+    (apres un aller-retour par la configuration) ne doit jamais recreer le
+    controleur ni perdre le formulaire deja saisi.
     """
-    import queue as queue_module
+    import queue
     import tkinter as tk
     from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-    screen_controller = ip.PublicationScreenController()
+    screen_controller = publication_controller
     form_state = screen_controller.form_state
 
     frame = ttk.Frame(root, padding=16)
@@ -289,11 +292,31 @@ def _build_publication_screen(root, open_config_screen) -> "ip.PublicationScreen
     }
     browse_buttons = (docx_browse_button, metadata_browse_button, workspace_browse_button, output_browse_button)
 
+    def sync_form_state_from_widgets() -> None:
+        """Reporter les valeurs visibles des widgets vers form_state.
+
+        Appelee avant toute publication et avant de quitter l'ecran (ouverture
+        de la configuration) : les widgets seront detruits, form_state doit
+        donc deja refleter la derniere saisie visible a l'ecran.
+        """
+        form_state.docx_path = docx_var.get()
+        form_state.metadata_path = metadata_var.get()
+        form_state.workspace_dir = workspace_var.get()
+        form_state.output_dir = output_var.get()
+        mode = ip.output_mode_from_label(output_mode_var.get())
+        if mode is not None:
+            form_state.output_mode = mode
+        form_state.latex_engine = ip.DEFAULT_LATEX_ENGINE
+
+    def on_open_config_screen() -> None:
+        sync_form_state_from_widgets()
+        open_config_screen()
+
     button_row_frame = ttk.Frame(frame)
     button_row_frame.grid(row=row, column=0, columnspan=3, sticky="w", pady=(12, 0))
     publish_button = ttk.Button(button_row_frame, text="Publier")
     publish_button.pack(side="left")
-    config_button = ttk.Button(button_row_frame, text="Configurer les dépendances…", command=open_config_screen)
+    config_button = ttk.Button(button_row_frame, text="Configurer les dépendances…", command=on_open_config_screen)
     config_button.pack(side="left", padx=(8, 0))
     row += 1
 
@@ -332,12 +355,15 @@ def _build_publication_screen(root, open_config_screen) -> "ip.PublicationScreen
         summary_label.pack(anchor="w")
         actions = ip.describe_openable_artifacts(result)
         if actions:
+            # Grille compacte sur deux colonnes : jusqu'a sept boutons peuvent
+            # deborder d'une fenetre etroite s'ils restent sur une seule ligne.
             actions_frame = ttk.Frame(report_frame)
-            actions_frame.pack(anchor="w", pady=(12, 0))
-            for action in actions:
+            actions_frame.pack(anchor="w", fill="x", pady=(12, 0))
+            for index, action in enumerate(actions):
+                grid_row, grid_column = ip.action_grid_position(index, columns=2)
                 ttk.Button(
                     actions_frame, text=action.label, command=lambda path=action.path: open_artifact_safe(path)
-                ).pack(side="left", padx=(0, 6), pady=(0, 6))
+                ).grid(row=grid_row, column=grid_column, sticky="w", padx=(0, 6), pady=(0, 6))
 
     def show_error_report(message: str) -> None:
         clear_report()
@@ -347,10 +373,10 @@ def _build_publication_screen(root, open_config_screen) -> "ip.PublicationScreen
         text_widget.configure(state="disabled")
         text_widget.pack(fill="both", expand=True, pady=(8, 0))
 
-    def poll_job(result_queue: "queue_module.Queue", waiting_dialog) -> None:
+    def poll_job(result_queue: queue.Queue, waiting_dialog) -> None:
         try:
             event = result_queue.get_nowait()
-        except queue_module.Empty:
+        except queue.Empty:
             root.after(100, lambda: poll_job(result_queue, waiting_dialog))
             return
         waiting_dialog.destroy()
@@ -403,15 +429,7 @@ def _build_publication_screen(root, open_config_screen) -> "ip.PublicationScreen
             # un evenement en file d'attente juste avant la desactivation.
             return
 
-        form_state.docx_path = docx_var.get()
-        form_state.metadata_path = metadata_var.get()
-        form_state.workspace_dir = workspace_var.get()
-        form_state.output_dir = output_var.get()
-        mode = ip.output_mode_from_label(output_mode_var.get())
-        if mode is not None:
-            form_state.output_mode = mode
-        engine = ip.DEFAULT_LATEX_ENGINE
-        form_state.latex_engine = engine
+        sync_form_state_from_widgets()
 
         issues = ip.validate_publication_form(form_state)
         if issues:
@@ -452,7 +470,7 @@ def _build_publication_screen(root, open_config_screen) -> "ip.PublicationScreen
         clear_report()
         set_form_enabled(False)
         waiting_dialog = show_waiting_dialog()
-        result_queue: "queue_module.Queue" = queue_module.Queue()
+        result_queue: queue.Queue = queue.Queue()
 
         def worker() -> None:
             event = ip.run_publication_job(request)
@@ -478,7 +496,6 @@ def _build_publication_screen(root, open_config_screen) -> "ip.PublicationScreen
         output_mode_var,
         latex_engine_var,
     )
-    return screen_controller
 
 
 def run_gui() -> None:
@@ -490,15 +507,16 @@ def run_gui() -> None:
 
     root = tk.Tk()
     root.title("Chaine editoriale")
+    root.geometry("900x650")
+    root.minsize(760, 520)
 
-    # Reference partagee vers le controleur d'ecran de publication courant :
-    # une publication en cours ne doit jamais etre interrompue brutalement
-    # par la fermeture de la fenetre principale.
-    active_publication_screen: dict = {"controller": None}
+    # Instance unique pour toute la session : l'ecran de publication est
+    # reconstruit a chaque retour depuis la configuration, mais ce
+    # controleur (formulaire + etat occupe) ne doit jamais l'etre.
+    publication_controller = ip.PublicationScreenController()
 
     def on_close_request() -> None:
-        screen_controller = active_publication_screen["controller"]
-        if screen_controller is not None and screen_controller.busy:
+        if publication_controller.busy:
             messagebox.showinfo(
                 "Publication en cours",
                 "Une publication est en cours. Attendez sa fin avant de fermer la fenetre.",
@@ -516,7 +534,9 @@ def run_gui() -> None:
             warning_frame = tk.Frame(root, padx=16, pady=(8, 0))
             warning_frame.pack(fill="x")
             tk.Label(warning_frame, text=controller.startup_warning, justify="left", fg="#a15c00").pack(anchor="w")
-        active_publication_screen["controller"] = _build_publication_screen(root, show_config_screen)
+        _build_publication_screen(
+            root, publication_controller, lambda: show_config_screen(opened_from_main=True)
+        )
 
     def show_restart_required_screen() -> None:
         for child in root.winfo_children():
@@ -526,11 +546,20 @@ def run_gui() -> None:
         tk.Label(frame, text=controller.post_save_message(), justify="left").pack(anchor="w")
         tk.Button(frame, text="Fermer", command=root.destroy).pack(anchor="w", pady=(12, 0))
 
-    def show_config_screen() -> None:
+    def show_config_screen(opened_from_main: bool = False) -> None:
         for child in root.winfo_children():
             child.destroy()
         frame = tk.Frame(root, padx=16, pady=16)
         frame.pack(fill="both", expand=True)
+
+        # Instantane de la configuration active a l'ouverture : un retour
+        # sans enregistrement doit restaurer exactement cet etat, sans que le
+        # ConfigController ne conserve silencieusement des modifications non
+        # enregistrees comme si elles etaient actives.
+        active_mini_metopes_path = controller.mini_metopes_path
+        active_purh_site_path = controller.purh_site_path
+        active_verification = controller.verification
+        active_verified_for = controller._verified_for
 
         mini_metopes_var = tk.StringVar(value=controller.mini_metopes_path)
         purh_site_var = tk.StringVar(value=controller.purh_site_path)
@@ -575,6 +604,15 @@ def run_gui() -> None:
                 # paquets deja charges depuis un autre emplacement.
                 show_restart_required_screen()
 
+        def on_cancel_return() -> None:
+            # Rien n'est enregistre ni revenerifie : la configuration active
+            # (avant l'ouverture de cet ecran) est simplement restauree.
+            controller.mini_metopes_path = active_mini_metopes_path
+            controller.purh_site_path = active_purh_site_path
+            controller.verification = active_verification
+            controller._verified_for = active_verified_for
+            show_main_screen()
+
         tk.Label(frame, text="Depot Mini-Metopes").grid(row=0, column=0, sticky="w")
         tk.Entry(frame, textvariable=mini_metopes_var, width=50).grid(row=0, column=1, sticky="we")
         tk.Button(frame, text="Parcourir...", command=browse_mini_metopes).grid(row=0, column=2)
@@ -586,6 +624,10 @@ def run_gui() -> None:
         tk.Button(frame, text="Verifier", command=on_verify).grid(row=2, column=0, pady=(8, 0))
         save_button = tk.Button(frame, text="Enregistrer", command=on_save, state="disabled")
         save_button.grid(row=2, column=1, pady=(8, 0), sticky="w")
+        if opened_from_main:
+            tk.Button(frame, text="Retour à la publication", command=on_cancel_return).grid(
+                row=2, column=2, pady=(8, 0), sticky="w"
+            )
 
         status_label = tk.Label(frame, textvariable=status_var, justify="left", anchor="w")
         status_label.grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))

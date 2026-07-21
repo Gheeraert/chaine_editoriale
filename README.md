@@ -130,3 +130,18 @@ faire echouer le reste de la publication.
 La publication s'execute dans un thread separe (la fenetre reste reactive)
 et affiche un rapport final listant les artefacts reellement produits, avec
 des boutons pour les ouvrir directement (association Windows par defaut).
+
+Le dossier de travail et le dossier de publication sont valides reellement :
+un chemin qui designe deja un fichier est refuse avant toute publication. Si
+l'un de ces dossiers existe deja et contient des fichiers, une confirmation
+explicite est demandee avant de reutiliser ce dossier (des fichiers portant
+les memes noms pourront etre remplaces) ; un dossier absent ou vide ne
+declenche aucune confirmation.
+
+Le formulaire de publication (les quatre chemins, le mode de sortie et le
+moteur LaTeX) est conserve pendant toute la session de l'application, y
+compris lors d'un aller-retour par `Configurer les dependances...`. Depuis
+cet ecran de configuration, un bouton `Retour a la publication` permet de
+revenir sans rien enregistrer ni relancer de verification, tant qu'une
+configuration valide est deja active (absent au tout premier lancement et
+sur l'ecran de redemarrage requis).

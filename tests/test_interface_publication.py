@@ -44,6 +44,7 @@ def _make_result(
     *,
     with_latei: bool = True,
     with_pdf: bool = True,
+    with_xml: bool = True,
     pdf_status: str = "generated",
     diagnostics: tuple[object, ...] = (),
 ) -> object:
@@ -58,7 +59,8 @@ def _make_result(
 
     xml_path = tmp_path / "workspace" / "source" / "document.xml"
     xml_path.parent.mkdir(parents=True, exist_ok=True)
-    xml_path.write_text("<TEI/>", encoding="utf-8")
+    if with_xml:
+        xml_path.write_text("<TEI/>", encoding="utf-8")
 
     latei_path = None
     if with_latei:
@@ -196,6 +198,130 @@ def test_validate_publication_form_identical_directories(tmp_path: Path, minimal
     assert any(issue.field == "output_dir" and "différent" in issue.message for issue in issues)
 
 
+def test_validate_publication_form_identical_directories_with_surrounding_spaces(
+    tmp_path: Path, minimal_docx_path: Path, minimal_metadata_path: Path
+) -> None:
+    same_dir = str(tmp_path / "shared")
+    state = ip.PublicationFormState(
+        docx_path=str(minimal_docx_path),
+        metadata_path=str(minimal_metadata_path),
+        workspace_dir=f"  {same_dir}  ",
+        output_dir=same_dir,
+    )
+    issues = ip.validate_publication_form(state)
+    assert any(issue.field == "output_dir" and "différent" in issue.message for issue in issues)
+
+
+# ---------------------------------------------------------------------------
+# Validation reelle des dossiers de travail et de publication (objectif 1)
+
+
+def test_validate_publication_form_workspace_is_a_file(tmp_path: Path, minimal_docx_path: Path, minimal_metadata_path: Path) -> None:
+    workspace_file = tmp_path / "rapport.txt"
+    workspace_file.write_text("x", encoding="utf-8")
+    state = ip.PublicationFormState(
+        docx_path=str(minimal_docx_path),
+        metadata_path=str(minimal_metadata_path),
+        workspace_dir=str(workspace_file),
+        output_dir=str(tmp_path / "out"),
+    )
+    issues = ip.validate_publication_form(state)
+    matching = [issue for issue in issues if issue.field == "workspace_dir"]
+    assert matching, issues
+    assert "n'est pas un dossier" in matching[0].message
+    assert str(workspace_file) in matching[0].message
+
+
+def test_validate_publication_form_output_is_a_file(tmp_path: Path, minimal_docx_path: Path, minimal_metadata_path: Path) -> None:
+    output_file = tmp_path / "rapport.txt"
+    output_file.write_text("x", encoding="utf-8")
+    state = ip.PublicationFormState(
+        docx_path=str(minimal_docx_path),
+        metadata_path=str(minimal_metadata_path),
+        workspace_dir=str(tmp_path / "ws"),
+        output_dir=str(output_file),
+    )
+    issues = ip.validate_publication_form(state)
+    matching = [issue for issue in issues if issue.field == "output_dir"]
+    assert matching, issues
+    assert "n'est pas un dossier" in matching[0].message
+
+
+def test_validate_directory_path_absent_is_valid(tmp_path: Path) -> None:
+    issues = ip.validate_directory_path(str(tmp_path / "absent"), field_name="workspace_dir", label="dossier de travail")
+    assert issues == ()
+
+
+def test_validate_directory_path_empty_existing_directory_is_valid(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    issues = ip.validate_directory_path(str(empty), field_name="workspace_dir", label="dossier de travail")
+    assert issues == ()
+
+
+def test_validate_directory_path_non_empty_existing_directory_is_valid(tmp_path: Path) -> None:
+    """La validation de formulaire n'est pas responsable de la confirmation d'ecrasement."""
+    populated = tmp_path / "populated"
+    populated.mkdir()
+    (populated / "existing.txt").write_text("x", encoding="utf-8")
+    issues = ip.validate_directory_path(str(populated), field_name="output_dir", label="dossier de publication")
+    assert issues == ()
+
+
+def test_validate_directory_path_file_is_rejected(tmp_path: Path) -> None:
+    a_file = tmp_path / "rapport.txt"
+    a_file.write_text("x", encoding="utf-8")
+    issues = ip.validate_directory_path(str(a_file), field_name="output_dir", label="dossier de publication")
+    assert len(issues) == 1
+    assert issues[0].field == "output_dir"
+    assert "n'est pas un dossier" in issues[0].message
+
+
+def test_validate_directory_path_empty_field_is_rejected() -> None:
+    issues = ip.validate_directory_path("   ", field_name="workspace_dir", label="dossier de travail")
+    assert len(issues) == 1
+    assert "obligatoire" in issues[0].message
+
+
+def test_validate_directory_path_read_error_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "unreadable"
+
+    def _failing_exists(self: Path) -> bool:
+        raise OSError("acces refuse simule")
+
+    monkeypatch.setattr(Path, "exists", _failing_exists)
+    issues = ip.validate_directory_path(str(target), field_name="workspace_dir", label="dossier de travail")
+    assert len(issues) == 1
+    assert "illisible" in issues[0].message
+
+
+def test_validate_publication_form_directory_error_accumulates_with_other_issues(tmp_path: Path) -> None:
+    workspace_file = tmp_path / "rapport.txt"
+    workspace_file.write_text("x", encoding="utf-8")
+    state = ip.PublicationFormState(
+        docx_path="",
+        metadata_path="",
+        workspace_dir=str(workspace_file),
+        output_dir="",
+    )
+    issues = ip.validate_publication_form(state)
+    fields = {issue.field for issue in issues}
+    assert fields == {"docx_path", "metadata_path", "workspace_dir", "output_dir"}
+    workspace_issue = next(issue for issue in issues if issue.field == "workspace_dir")
+    assert "n'est pas un dossier" in workspace_issue.message
+
+
+# ---------------------------------------------------------------------------
+# directory_is_non_empty() ne confond plus un fichier avec un dossier non vide
+
+
+def test_directory_is_non_empty_on_file_raises_not_a_directory_error(tmp_path: Path) -> None:
+    a_file = tmp_path / "rapport.txt"
+    a_file.write_text("x", encoding="utf-8")
+    with pytest.raises(NotADirectoryError):
+        ip.directory_is_non_empty(a_file)
+
+
 def test_validate_publication_form_unknown_mode(tmp_path: Path, minimal_docx_path: Path, minimal_metadata_path: Path) -> None:
     state = _valid_state(tmp_path, minimal_docx_path, minimal_metadata_path)
     state.output_mode = "mode-inconnu"
@@ -262,6 +388,65 @@ def test_build_publication_request_transmits_engine_and_normalizes_paths(
     assert isinstance(request.metadata_path, Path)
     assert isinstance(request.workspace_dir, Path)
     assert isinstance(request.output_dir, Path)
+
+
+# ---------------------------------------------------------------------------
+# Normalisation des chemins saisis (objectif 2)
+
+
+def test_normalized_path_strips_surrounding_spaces() -> None:
+    assert ip.normalized_path("  C:\\a\\b  ") == Path("C:\\a\\b")
+
+
+def test_validate_publication_form_accepts_docx_with_surrounding_spaces(
+    tmp_path: Path, minimal_docx_path: Path, minimal_metadata_path: Path
+) -> None:
+    state = _valid_state(tmp_path, minimal_docx_path, minimal_metadata_path)
+    state.docx_path = f"  {minimal_docx_path}  "
+    assert ip.validate_publication_form(state) == ()
+
+
+def test_validate_publication_form_accepts_metadata_with_surrounding_spaces(
+    tmp_path: Path, minimal_docx_path: Path, minimal_metadata_path: Path
+) -> None:
+    state = _valid_state(tmp_path, minimal_docx_path, minimal_metadata_path)
+    state.metadata_path = f"  {minimal_metadata_path}  "
+    assert ip.validate_publication_form(state) == ()
+
+
+def test_validate_publication_form_accepts_workspace_with_surrounding_spaces(
+    tmp_path: Path, minimal_docx_path: Path, minimal_metadata_path: Path
+) -> None:
+    state = _valid_state(tmp_path, minimal_docx_path, minimal_metadata_path)
+    state.workspace_dir = f"  {state.workspace_dir}  "
+    assert ip.validate_publication_form(state) == ()
+
+
+def test_validate_publication_form_accepts_output_with_surrounding_spaces(
+    tmp_path: Path, minimal_docx_path: Path, minimal_metadata_path: Path
+) -> None:
+    state = _valid_state(tmp_path, minimal_docx_path, minimal_metadata_path)
+    state.output_dir = f"  {state.output_dir}  "
+    assert ip.validate_publication_form(state) == ()
+
+
+def test_build_publication_request_contains_stripped_paths(
+    tmp_path: Path, minimal_docx_path: Path, minimal_metadata_path: Path
+) -> None:
+    state = _valid_state(tmp_path, minimal_docx_path, minimal_metadata_path)
+    workspace_clean = state.workspace_dir
+    output_clean = state.output_dir
+    state.docx_path = f"  {minimal_docx_path}  "
+    state.metadata_path = f"  {minimal_metadata_path}  "
+    state.workspace_dir = f"  {workspace_clean}  "
+    state.output_dir = f"  {output_clean}  "
+
+    request = ip.build_publication_request(state)
+
+    assert request.docx_path == Path(str(minimal_docx_path).strip())
+    assert request.metadata_path == Path(str(minimal_metadata_path).strip())
+    assert request.workspace_dir == Path(workspace_clean)
+    assert request.output_dir == Path(output_clean)
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +592,7 @@ def test_format_publication_summary_full_success(tmp_path: Path) -> None:
     result = _make_result(tmp_path, with_latei=True, with_pdf=True, pdf_status="generated")
     summary = ip.format_publication_summary(result)
     assert "Publication terminée" in summary
+    assert "XML Commons intermédiaire : produit" in summary
     assert "Site HTML : produit" in summary
     assert "XML normalisé : produit" in summary
     assert "LaTEI : produit" in summary
@@ -414,9 +600,16 @@ def test_format_publication_summary_full_success(tmp_path: Path) -> None:
     assert "Manifeste : produit" in summary
 
 
+def test_format_publication_summary_intermediate_xml_absent(tmp_path: Path) -> None:
+    result = _make_result(tmp_path, with_xml=False)
+    summary = ip.format_publication_summary(result)
+    assert "XML Commons intermédiaire : non produit" in summary
+
+
 def test_format_publication_summary_mode_without_latei_pdf(tmp_path: Path) -> None:
     result = _make_result(tmp_path, with_latei=False, with_pdf=False, pdf_status="not_requested")
     summary = ip.format_publication_summary(result)
+    assert "XML Commons intermédiaire : produit" in summary
     assert "LaTEI : non produit" in summary
     assert "PDF : non demandé" in summary
 
@@ -425,6 +618,7 @@ def test_format_publication_summary_pdf_unavailable_not_shown_as_failure(tmp_pat
     result = _make_result(tmp_path, with_latei=True, with_pdf=False, pdf_status="unavailable")
     summary = ip.format_publication_summary(result)
     assert "PDF : demandé mais non produit" in summary
+    assert "XML Commons intermédiaire : produit" in summary
     assert "Site HTML : produit" in summary
     assert "LaTEI : produit" in summary
 
@@ -529,6 +723,28 @@ def test_open_artifact_uses_os_startfile(tmp_path: Path, monkeypatch: pytest.Mon
     target.write_text("<html></html>", encoding="utf-8")
     ip.open_artifact(target)
     assert called == [target]
+
+
+# ---------------------------------------------------------------------------
+# Disposition en grille des actions d'ouverture (objectif 6)
+
+
+def test_action_grid_position_fills_rows_of_two_columns() -> None:
+    assert ip.action_grid_position(0, columns=2) == (0, 0)
+    assert ip.action_grid_position(1, columns=2) == (0, 1)
+    assert ip.action_grid_position(2, columns=2) == (1, 0)
+    assert ip.action_grid_position(3, columns=2) == (1, 1)
+    assert ip.action_grid_position(6, columns=2) == (3, 0)
+
+
+def test_action_grid_position_default_columns() -> None:
+    assert ip.action_grid_position(0) == (0, 0)
+    assert ip.action_grid_position(1) == (0, 1)
+
+
+def test_action_grid_position_rejects_non_positive_columns() -> None:
+    with pytest.raises(ValueError):
+        ip.action_grid_position(0, columns=0)
 
 
 # ---------------------------------------------------------------------------

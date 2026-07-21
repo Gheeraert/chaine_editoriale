@@ -166,6 +166,17 @@ class PublicationRequest:
 # Validation (fonctions pures, jamais de logique metier profonde)
 
 
+def normalized_path(raw_value: str) -> Path:
+    """Normalisation unique des quatre chemins du formulaire : strip puis Path.
+
+    Utilisee systematiquement par la validation, la comparaison
+    workspace/output, la construction de la requete et les suggestions de
+    repertoire initial, pour qu'un chemin valide a la validation ne puisse
+    jamais echouer plus tard a cause d'espaces residuels.
+    """
+    return Path(raw_value.strip())
+
+
 def validate_publication_form(state: PublicationFormState) -> tuple[PublicationValidationIssue, ...]:
     """Valider le formulaire et retourner TOUS les problemes detectes."""
     issues: list[PublicationValidationIssue] = []
@@ -173,20 +184,17 @@ def validate_publication_form(state: PublicationFormState) -> tuple[PublicationV
     _validate_input_file(state.docx_path, ".docx", "docx_path", "Le fichier DOCX", issues)
     _validate_input_file(state.metadata_path, ".json", "metadata_path", "Le fichier de métadonnées JSON", issues)
 
+    issues.extend(validate_directory_path(state.workspace_dir, field_name="workspace_dir", label="dossier de travail"))
+    issues.extend(validate_directory_path(state.output_dir, field_name="output_dir", label="dossier de publication"))
+
     workspace_text = state.workspace_dir.strip()
-    if not workspace_text:
-        issues.append(PublicationValidationIssue("workspace_dir", "Le dossier de travail est obligatoire."))
-
     output_text = state.output_dir.strip()
-    if not output_text:
-        issues.append(PublicationValidationIssue("output_dir", "Le dossier de publication est obligatoire."))
-
     if workspace_text and output_text:
-        try:
-            same_directory = Path(workspace_text).resolve() == Path(output_text).resolve()
-        except OSError:
-            same_directory = workspace_text == output_text
-        if same_directory:
+        # Pas de resolve() ici : les chemins de sortie peuvent ne pas encore
+        # exister, et resolve() ferait inutilement dependre la comparaison du
+        # repertoire courant du processus. Seule la normalisation (strip) est
+        # appliquee, des deux cotes, de la meme maniere qu'ailleurs.
+        if normalized_path(state.workspace_dir) == normalized_path(state.output_dir):
             issues.append(
                 PublicationValidationIssue(
                     "output_dir", "Le dossier de publication doit être différent du dossier de travail."
@@ -202,6 +210,44 @@ def validate_publication_form(state: PublicationFormState) -> tuple[PublicationV
     return tuple(issues)
 
 
+def validate_directory_path(
+    raw_value: str, *, field_name: str, label: str
+) -> tuple[PublicationValidationIssue, ...]:
+    """Valider un champ dossier (workspace ou output) sans jamais le creer.
+
+    - champ vide -> erreur ;
+    - chemin absent -> valide (sera cree pendant la publication) ;
+    - chemin existant et repertoire -> valide ;
+    - chemin existant et fichier -> erreur (jamais confondu avec un dossier
+      "non vide" a confirmer) ;
+    - chemin existant mais illisible -> erreur lisible, jamais une exception
+      brute remontee a l'appelant.
+    """
+    text = raw_value.strip()
+    if not text:
+        return (PublicationValidationIssue(field_name, f"Le {label} est obligatoire."),)
+
+    path = normalized_path(raw_value)
+    try:
+        exists = path.exists()
+    except OSError as error:
+        return (PublicationValidationIssue(field_name, f"Le chemin du {label} est illisible : {path}\n{error}"),)
+    if not exists:
+        return ()
+
+    try:
+        is_directory = path.is_dir()
+    except OSError as error:
+        return (PublicationValidationIssue(field_name, f"Le chemin du {label} est illisible : {path}\n{error}"),)
+    if not is_directory:
+        return (
+            PublicationValidationIssue(
+                field_name, f"Le chemin du {label} existe mais n'est pas un dossier :\n{path}"
+            ),
+        )
+    return ()
+
+
 def _validate_input_file(
     raw_value: str, expected_suffix: str, field_name: str, label: str, issues: list[PublicationValidationIssue]
 ) -> None:
@@ -209,7 +255,7 @@ def _validate_input_file(
     if not text:
         issues.append(PublicationValidationIssue(field_name, f"{label} est obligatoire."))
         return
-    path = Path(text)
+    path = normalized_path(raw_value)
     if not path.exists():
         issues.append(PublicationValidationIssue(field_name, f"{label} est introuvable : {path}"))
         return
@@ -233,10 +279,10 @@ def build_publication_request(state: PublicationFormState) -> PublicationRequest
         latex_engine=state.latex_engine,
     )
     return PublicationRequest(
-        docx_path=Path(state.docx_path),
-        metadata_path=Path(state.metadata_path),
-        workspace_dir=Path(state.workspace_dir),
-        output_dir=Path(state.output_dir),
+        docx_path=normalized_path(state.docx_path),
+        metadata_path=normalized_path(state.metadata_path),
+        workspace_dir=normalized_path(state.workspace_dir),
+        output_dir=normalized_path(state.output_dir),
         options=options,
     )
 
@@ -246,19 +292,20 @@ def build_publication_request(state: PublicationFormState) -> PublicationRequest
 
 
 def directory_is_non_empty(path: Path) -> bool:
-    """True si path existe et contient au moins une entree.
+    """True si path existe, est un dossier, et contient au moins une entree.
 
-    Un dossier absent est considere comme vide (rien a ecraser). Une erreur
-    de lecture n'est jamais confondue avec un dossier vide : elle remonte
-    telle quelle (``OSError``) pour que l'appelant la presente comme une
-    erreur.
+    Un dossier absent est considere comme vide (rien a ecraser). Un chemin
+    qui existe mais designe un fichier n'est PAS un cas de confirmation
+    d'ecrasement : ``validate_publication_form``/``validate_directory_path``
+    le rejette deja en amont comme une erreur de formulaire, donc cette
+    fonction leve ``NotADirectoryError`` (sous-classe d'``OSError``) plutot
+    que de le confondre avec un dossier non vide. Une erreur de lecture
+    n'est jamais confondue avec un dossier vide : elle remonte telle quelle.
     """
     if not path.exists():
         return False
     if not path.is_dir():
-        # Un chemin qui existe deja mais n'est pas un dossier merite aussi
-        # une confirmation explicite avant publication.
-        return True
+        raise NotADirectoryError(f"le chemin existe mais n'est pas un dossier : {path}")
     with os.scandir(path) as entries:
         return next(iter(entries), None) is not None
 
@@ -325,6 +372,7 @@ def format_publication_summary(result: PublicationResult) -> str:
     lines = [
         "Publication terminée",
         "",
+        f"XML Commons intermédiaire : {produced(result.xml_path)}",
         f"Site HTML : {produced(result.site_result.html_path)}",
         f"XML normalisé : {produced(result.site_result.normalized_tei_path)}",
         f"LaTEI : {produced(result.latei_path)}",
@@ -356,6 +404,13 @@ def describe_openable_artifacts(result: PublicationResult) -> tuple[ArtifactActi
         ("Ouvrir le dossier de publication", result.site_result.output_dir),
     )
     return tuple(ArtifactAction(label, path) for label, path in candidates if path is not None and path.exists())
+
+
+def action_grid_position(index: int, columns: int = 2) -> tuple[int, int]:
+    """Position (ligne, colonne) d'une action dans une grille compacte, ligne par ligne."""
+    if columns < 1:
+        raise ValueError("columns doit etre strictement positif")
+    return index // columns, index % columns
 
 
 def open_artifact(path: Path) -> None:
@@ -467,7 +522,7 @@ def initial_directory_for(*candidates: str) -> str:
         text = candidate.strip()
         if not text:
             continue
-        path = Path(text)
+        path = normalized_path(candidate)
         if path.is_file():
             return str(path.parent)
         if path.is_dir():
