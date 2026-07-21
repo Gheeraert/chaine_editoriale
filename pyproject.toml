@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chaine-editoriale"
+version = "0.1.0"
+description = "Orchestration entre Mini-Metopes (DOCX -> TEI) et Impressions (TEI -> site/LaTEI/PDF)"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Chaine editoriale" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+chaine-editoriale = "chaine_editoriale.gui:run_gui"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["chaine_editoriale*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+    "integration: tests d'integration bout-en-bout (necessitent mini_metopes et purh_site installes)",
+]

@@ -1,0 +1,2 @@
+[console_scripts]
+chaine-editoriale = chaine_editoriale.gui:run_gui

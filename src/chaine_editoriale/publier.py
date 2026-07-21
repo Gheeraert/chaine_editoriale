@@ -1,0 +1,237 @@
+"""Fonction coeur de la chaine editoriale : DOCX + JSON -> site publie.
+
+Les imports metier de mini_metopes et purh_site sont regroupes dans
+``_charger_dependances_metier`` et ne sont executes qu'apres verification
+reussie de la configuration des chemins (voir ``configuration.py``).
+"""
+
+from __future__ import annotations
+
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .configuration import activate_configured_dependencies, load_config
+from .erreurs import (
+    DependencyVerificationError,
+    InvalidMetadataError,
+    SiteBuildError,
+    TeiConversionError,
+    TeiWriteError,
+)
+from .manifeste import build_publication_manifest, write_publication_manifest
+from .modeles import PublicationOptions, PublicationResult
+
+
+@dataclass(frozen=True, slots=True)
+class _MiniMetopesApi:
+    load_metadata_file: Any
+    convert_docx_to_tei: Any
+    write_tei_conversion_result: Any
+    compute_file_sha256: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _PurhSiteApi:
+    BuildConfig: Any
+    SiteBuilder: Any
+
+
+def _charger_dependances_metier() -> tuple[_MiniMetopesApi, _PurhSiteApi]:
+    """Importer les facades publiques des deux bibliotheques, une fois activees."""
+    from mini_metopes.metadata import compute_file_sha256, load_metadata_file
+    from mini_metopes.tei import convert_docx_to_tei, write_tei_conversion_result
+    from purh_site.config import BuildConfig
+    from purh_site.site_builder import SiteBuilder
+
+    return (
+        _MiniMetopesApi(load_metadata_file, convert_docx_to_tei, write_tei_conversion_result, compute_file_sha256),
+        _PurhSiteApi(BuildConfig, SiteBuilder),
+    )
+
+
+def _verifier_dependances() -> dict[str, dict[str, str]]:
+    """Verifier la configuration activee et retourner les chemins reellement resolus."""
+    load_result = load_config()
+    if not load_result.valid or load_result.config is None:
+        raise DependencyVerificationError(
+            "la configuration de la chaine editoriale (config_chaine.json) est absente ou invalide ; "
+            "ouvrez l'ecran de configuration avant de publier",
+            diagnostics=load_result.issues,
+        )
+    verification = activate_configured_dependencies(load_result.config)
+    if not verification.success:
+        raise DependencyVerificationError(
+            "mini_metopes ou purh_site n'a pas pu etre resolu depuis les chemins configures : "
+            f"mini_metopes={verification.mini_metopes.message} ; purh_site={verification.purh_site.message}",
+            diagnostics=(verification.mini_metopes, verification.purh_site),
+        )
+    return {
+        "mini_metopes": {
+            "configured_repository": str(verification.mini_metopes.configured_repository),
+            "import_root": str(verification.mini_metopes.import_root),
+            "module_path": str(verification.mini_metopes.module_path),
+        },
+        "purh_site": {
+            "configured_repository": str(verification.purh_site.configured_repository),
+            "import_root": str(verification.purh_site.import_root),
+            "module_path": str(verification.purh_site.module_path),
+        },
+    }
+
+
+def publier(
+    docx_path: Path,
+    metadata_path: Path,
+    workspace_dir: Path,
+    output_dir: Path,
+    *,
+    options: PublicationOptions | None = None,
+) -> PublicationResult:
+    """Publier un DOCX+JSON en un site (HTML, XML normalise, LaTEI, PDF eventuel).
+
+    La configuration technique locale (chemins de mini_metopes et de
+    purh_site) est lue depuis ``configuration.default_config_path()`` et
+    activee avant tout import metier.
+    """
+    resolved_options = options if options is not None else PublicationOptions()
+    dependencies = _verifier_dependances()
+    mini_metopes_api, purh_site_api = _charger_dependances_metier()
+
+    docx_path = docx_path.resolve()
+    metadata_path = metadata_path.resolve()
+    if not docx_path.is_file():
+        raise InvalidMetadataError(f"fichier DOCX introuvable : {docx_path}")
+    if not metadata_path.is_file():
+        raise InvalidMetadataError(f"fichier de metadonnees introuvable : {metadata_path}")
+
+    metadata_result = mini_metopes_api.load_metadata_file(metadata_path)
+    if metadata_result.metadata is None:
+        raise InvalidMetadataError(
+            f"metadonnees invalides : {metadata_path}",
+            diagnostics=metadata_result.issues,
+        )
+
+    conversion = mini_metopes_api.convert_docx_to_tei(docx_path, metadata=metadata_result.metadata)
+    if not conversion.is_successful:
+        raise TeiConversionError(
+            f"conversion DOCX -> TEI impossible : {docx_path}",
+            diagnostics=conversion.diagnostics,
+            validation_issues=conversion.validation_issues,
+        )
+
+    source_dir = workspace_dir / "source"
+    tei_path = source_dir / "document.xml"
+    try:
+        write_result = mini_metopes_api.write_tei_conversion_result(conversion, tei_path)
+    except (OSError, ValueError) as error:
+        raise TeiWriteError(f"ecriture de la TEI impossible : {tei_path}", cause=error) from error
+
+    media_directory = Path(write_result.media_directory) if write_result.media_directory else None
+    assets_root = _preparer_assets_impressions(media_directory, workspace_dir)
+
+    build_config = purh_site_api.BuildConfig(
+        output_dir=output_dir,
+        assets_dir=assets_root,
+        write_normalized_tei=resolved_options.write_normalized_tei,
+        collection_title=resolved_options.collection_title,
+        collection_number=resolved_options.collection_number,
+        collection_issn=resolved_options.collection_issn,
+        pdf_export_mode=resolved_options.pdf_export_mode,
+        latex_engine=resolved_options.latex_engine,
+    )
+    try:
+        site_result = purh_site_api.SiteBuilder().build_from_master(tei_path, build_config)
+    except Exception as error:  # noqa: BLE001 - converti en erreur propre a la chaine.
+        raise SiteBuildError(f"construction du site impossible depuis {tei_path}", cause=error) from error
+
+    latei_path = _existing_or_none(output_dir / "assets" / "generated" / "book.tex")
+    pdf_path = _existing_or_none(output_dir / "assets" / "generated" / "book.pdf")
+    pdf_status = _pdf_status(resolved_options.pdf_export_mode, pdf_path)
+
+    manifest_path = workspace_dir / "publication.json"
+    manifest = build_publication_manifest(
+        workspace_dir=workspace_dir,
+        output_dir=output_dir,
+        docx_path=docx_path,
+        docx_sha256=mini_metopes_api.compute_file_sha256(docx_path),
+        metadata_path=metadata_path,
+        metadata_sha256=mini_metopes_api.compute_file_sha256(metadata_path),
+        tei_path=tei_path,
+        tei_sha256=mini_metopes_api.compute_file_sha256(tei_path),
+        media_directory=media_directory,
+        options=resolved_options,
+        outputs={
+            "index_html": _existing_or_none(site_result.html_path),
+            "normalized_tei": site_result.normalized_tei_path,
+            "latei": latei_path,
+            "pdf": pdf_path,
+            "build_report": _existing_or_none(site_result.report_path),
+        },
+        pdf_status=pdf_status,
+        dependencies=dependencies,
+    )
+    write_publication_manifest(manifest, manifest_path)
+
+    return PublicationResult(
+        xml_path=tei_path,
+        media_directory=media_directory,
+        assets_root=assets_root,
+        site_result=site_result,
+        latei_path=latei_path,
+        pdf_path=pdf_path,
+        pdf_status=pdf_status,
+        manifest_path=manifest_path,
+        conversion_diagnostics=conversion.diagnostics,
+    )
+
+
+def _existing_or_none(path: Path | None) -> Path | None:
+    if path is None:
+        return None
+    return path if path.exists() else None
+
+
+def _pdf_status(pdf_export_mode: str, pdf_path: Path | None) -> str:
+    if pdf_export_mode == "none":
+        return "not_requested"
+    if pdf_path is not None:
+        return "generated"
+    return "unavailable"
+
+
+def _preparer_assets_impressions(media_directory: Path | None, workspace_dir: Path) -> Path | None:
+    """Copier <media_directory> vers workspace/impressions-assets/media en preservant ce niveau.
+
+    Impressions copie tel quel le contenu d'``assets_dir`` a la racine des
+    assets du site ; passer directement le dossier ``media`` produit par
+    Mini-Metopes supprimerait donc ce niveau. On construit ici une racine
+    d'assets intermediaire qui contient un unique sous-dossier ``media``.
+    """
+    if media_directory is None:
+        return None
+    if not media_directory.exists():
+        raise TeiWriteError(f"dossier de medias annonce mais introuvable : {media_directory}")
+
+    assets_root = workspace_dir / "impressions-assets"
+    destination = assets_root / "media"
+    destination.mkdir(parents=True, exist_ok=True)
+    for source_file in sorted(media_directory.iterdir()):
+        if not source_file.is_file():
+            continue
+        target_file = destination / source_file.name
+        if target_file.exists():
+            if not _files_identical(source_file, target_file):
+                raise TeiWriteError(
+                    f"conflit de media existant : {target_file} differe du contenu produit par Mini-Metopes"
+                )
+            continue
+        shutil.copy2(source_file, target_file)
+    return assets_root
+
+
+def _files_identical(left: Path, right: Path) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    return left.read_bytes() == right.read_bytes()

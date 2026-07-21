@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "source_document": {
+    "path": "document_minimal.docx",
+    "sha256": "6f4088ba95829c31411cc596521acf459558f74942bfad931f5112659c4c8905"
+  },
+  "document": {
+    "type": "chapter",
+    "language": "fr",
+    "title": "Document minimal",
+    "subtitle": null
+  },
+  "contributors": [
+    {
+      "id": "person-1",
+      "role": "author",
+      "given_name": "Ada",
+      "family_name": "Exemple",
+      "affiliations": []
+    }
+  ],
+  "affiliations": []
+}
