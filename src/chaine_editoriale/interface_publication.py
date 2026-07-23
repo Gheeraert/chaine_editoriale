@@ -182,7 +182,7 @@ def validate_publication_form(state: PublicationFormState) -> tuple[PublicationV
     issues: list[PublicationValidationIssue] = []
 
     _validate_input_file(state.docx_path, ".docx", "docx_path", "Le fichier DOCX", issues)
-    _validate_input_file(state.metadata_path, ".json", "metadata_path", "Le fichier de métadonnées JSON", issues)
+    _validate_metadata_field(state.docx_path, state.metadata_path, issues)
 
     issues.extend(validate_directory_path(state.workspace_dir, field_name="workspace_dir", label="dossier de travail"))
     issues.extend(validate_directory_path(state.output_dir, field_name="output_dir", label="dossier de publication"))
@@ -265,6 +265,51 @@ def _validate_input_file(
     if path.suffix.lower() != expected_suffix:
         issues.append(
             PublicationValidationIssue(field_name, f"{label} doit avoir l'extension {expected_suffix} : {path}")
+        )
+
+
+def _validate_metadata_field(
+    docx_value: str, metadata_value: str, issues: list[PublicationValidationIssue]
+) -> None:
+    """Valider le champ metadonnees, avec un diagnostic actionnable quand le JSON reste a creer.
+
+    Distingue explicitement le cas ou un DOCX valide est deja choisi mais ou
+    le JSON conventionnel n'existe pas encore : le message renvoie alors vers
+    le bouton "Creer les metadonnees..." plutot que d'annoncer un simple
+    fichier introuvable.
+    """
+    text = metadata_value.strip()
+    if not text:
+        issues.append(PublicationValidationIssue("metadata_path", "Le fichier de métadonnées JSON est obligatoire."))
+        return
+
+    path = normalized_path(metadata_value)
+    if not path.exists():
+        if path.suffix.lower() == ".json" and docx_value.strip():
+            issues.append(
+                PublicationValidationIssue(
+                    "metadata_path",
+                    "Les métadonnées n'ont pas encore été créées.\n"
+                    "Cliquez sur « Créer les métadonnées… » avant de publier.",
+                )
+            )
+        else:
+            issues.append(
+                PublicationValidationIssue("metadata_path", f"Le fichier de métadonnées JSON est introuvable : {path}")
+            )
+        return
+
+    if not path.is_file():
+        issues.append(
+            PublicationValidationIssue(
+                "metadata_path", f"Le fichier de métadonnées JSON n'est pas un fichier régulier : {path}"
+            )
+        )
+        return
+
+    if path.suffix.lower() != ".json":
+        issues.append(
+            PublicationValidationIssue("metadata_path", f"Le fichier de métadonnées JSON doit avoir l'extension .json : {path}")
         )
 
 
@@ -537,3 +582,110 @@ def suggest_workspace_and_output_dirs(docx_path: Path) -> tuple[str, str]:
     stem = docx_path.stem
     parent = docx_path.parent
     return str(parent / f"{stem}-travail"), str(parent / f"{stem}-site")
+
+
+# ---------------------------------------------------------------------------
+# Presentation de l'etat du chemin des metadonnees (parcours creer/modifier)
+#
+# Fonctions pures : elles ne valident jamais le contenu JSON (responsabilite
+# de publier()/Mini-Metopes) et n'importent ni Tkinter ni mini_metopes.
+
+MetadataPathState = Literal["no_docx", "missing", "available", "invalid_path"]
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataPathPresentation:
+    """Description de l'etat du chemin des metadonnees, prete a afficher."""
+
+    state: MetadataPathState
+    status_text: str
+    editor_button_text: str
+    can_edit: bool
+
+
+_CREATE_BUTTON_TEXT = "Créer les métadonnées…"
+_MODIFY_BUTTON_TEXT = "Modifier les métadonnées…"
+
+
+def describe_metadata_path(docx_value: str, metadata_value: str) -> MetadataPathPresentation:
+    """Decrire l'etat du chemin des metadonnees pour piloter le bouton dynamique et le statut."""
+    if not docx_value.strip():
+        return MetadataPathPresentation(
+            state="no_docx",
+            status_text="Choisissez d'abord un document DOCX.",
+            editor_button_text=_CREATE_BUTTON_TEXT,
+            can_edit=False,
+        )
+
+    text = metadata_value.strip()
+    if not text:
+        return MetadataPathPresentation(
+            state="missing",
+            status_text="Métadonnées à créer.",
+            editor_button_text=_CREATE_BUTTON_TEXT,
+            can_edit=True,
+        )
+
+    path = normalized_path(metadata_value)
+    name = path.name
+
+    if path.suffix.lower() != ".json":
+        return MetadataPathPresentation(
+            state="invalid_path",
+            status_text="Le chemin des métadonnées n'est pas un fichier JSON utilisable.",
+            editor_button_text=_CREATE_BUTTON_TEXT,
+            can_edit=False,
+        )
+
+    try:
+        exists = path.exists()
+    except OSError as error:
+        return MetadataPathPresentation(
+            state="invalid_path",
+            status_text=f"Le chemin des métadonnées est illisible : {path}\n{error}",
+            editor_button_text=_CREATE_BUTTON_TEXT,
+            can_edit=False,
+        )
+
+    if not exists:
+        return MetadataPathPresentation(
+            state="missing",
+            status_text=f"Métadonnées à créer : {name}",
+            editor_button_text=_CREATE_BUTTON_TEXT,
+            can_edit=True,
+        )
+
+    try:
+        is_file = path.is_file()
+    except OSError as error:
+        return MetadataPathPresentation(
+            state="invalid_path",
+            status_text=f"Le chemin des métadonnées est illisible : {path}\n{error}",
+            editor_button_text=_CREATE_BUTTON_TEXT,
+            can_edit=False,
+        )
+
+    if not is_file:
+        return MetadataPathPresentation(
+            state="invalid_path",
+            status_text="Le chemin des métadonnées n'est pas un fichier JSON utilisable.",
+            editor_button_text=_CREATE_BUTTON_TEXT,
+            can_edit=False,
+        )
+
+    return MetadataPathPresentation(
+        state="available",
+        status_text=f"Fichier de métadonnées trouvé : {name}",
+        editor_button_text=_MODIFY_BUTTON_TEXT,
+        can_edit=True,
+    )
+
+
+def docx_change_resets_metadata(previous_docx_value: str, new_docx_value: str) -> bool:
+    """True si un changement explicite de DOCX doit remplacer le JSON par le chemin conventionnel.
+
+    Compare les chemins normalises : une re-saisie identique (espaces
+    residuels, focus sans modification) ne doit jamais reinitialiser un JSON
+    deja choisi.
+    """
+    return normalized_path(previous_docx_value) != normalized_path(new_docx_value)

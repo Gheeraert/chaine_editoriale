@@ -29,6 +29,10 @@ class DependencyVerificationError(ConfigurationError):
         self.diagnostics = diagnostics
 
 
+class MetadataEditorIntegrationError(ChaineEditorialeError):
+    """L'editeur de metadonnees integrable de Mini-Metopes est absent ou son contrat n'est pas respecte."""
+
+
 class InvalidMetadataError(ChaineEditorialeError):
     """Les metadonnees JSON n'ont pas pu etre chargees ou sont invalides."""
 

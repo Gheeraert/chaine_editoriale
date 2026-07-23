@@ -477,6 +477,285 @@ def test_publication_screen_artifact_buttons_span_multiple_rows(
     assert columns == {0, 1}
 
 
+# ---------------------------------------------------------------------------
+# Parcours de creation/modification des metadonnees integre a la GUI
+
+
+def _find_button(root, text: str):
+    return next(button for button in _widgets_by_class(root, "TButton") if button.cget("text") == text)
+
+
+def _find_docx_browse_button(root):
+    """Le bouton "Parcourir..." du DOCX n'est pas unique par texte (workspace/output le partagent).
+
+    Les trois boutons "Parcourir..." different par leur ligne de grille : le
+    DOCX est toujours a la ligne 2 (cf. gui._build_publication_screen). Ne
+    jamais se rabattre sur le premier match par texte seul : cliquer par
+    erreur sur un bouton "Parcourir..." relie a askdirectory() ouvrirait une
+    vraie boite de dialogue Windows, bloquant indefiniment le test.
+    """
+    for button in _widgets_by_class(root, "TButton"):
+        if button.cget("text") == "Parcourir…" and int(button.grid_info().get("row", -1)) == 2:
+            return button
+    raise AssertionError("bouton Parcourir... du DOCX introuvable a la ligne 2")
+
+
+def _find_label_texts(root) -> list[str]:
+    return [label.cget("text") for label in _widgets_by_class(root, "TLabel")]
+
+
+def test_choosing_docx_without_json_injects_conventional_path_without_creating_file(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chaine_editoriale import interface_publication as ip
+    from chaine_editoriale import metadata_editor_adapter
+
+    docx_path = tmp_path / "chapitre.docx"
+    docx_path.write_bytes(b"fake")
+    conventional_json = tmp_path / "chapitre.metadata.json"
+
+    monkeypatch.setattr(metadata_editor_adapter, "conventional_metadata_path", lambda docx: conventional_json)
+    monkeypatch.setattr("tkinter.filedialog.askopenfilename", lambda **kwargs: str(docx_path))
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    docx_browse_button = _find_docx_browse_button(root)
+    docx_browse_button.invoke()
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    assert entries[1].get() == str(conventional_json)
+    assert not conventional_json.exists()
+    assert _find_button(root, "Créer les métadonnées…") is not None
+    assert any("à créer" in text for text in _find_label_texts(root))
+
+
+def test_choosing_docx_with_existing_json_shows_modify_button(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chaine_editoriale import interface_publication as ip
+    from chaine_editoriale import metadata_editor_adapter
+
+    docx_path = tmp_path / "chapitre.docx"
+    docx_path.write_bytes(b"fake")
+    conventional_json = tmp_path / "chapitre.metadata.json"
+    conventional_json.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(metadata_editor_adapter, "conventional_metadata_path", lambda docx: conventional_json)
+    monkeypatch.setattr("tkinter.filedialog.askopenfilename", lambda **kwargs: str(docx_path))
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    docx_browse_button = _find_docx_browse_button(root)
+    docx_browse_button.invoke()
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    assert entries[1].get() == str(conventional_json)
+    assert _find_button(root, "Modifier les métadonnées…") is not None
+    assert any("trouvé" in text for text in _find_label_texts(root))
+
+
+def test_edit_metadata_saved_result_updates_both_paths(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chaine_editoriale import interface_publication as ip
+    from chaine_editoriale import metadata_editor_adapter
+
+    docx_path = tmp_path / "chapitre.docx"
+    docx_path.write_bytes(b"fake")
+    other_docx = tmp_path / "autre" / "relocalise.docx"
+    other_docx.parent.mkdir()
+    other_docx.write_bytes(b"fake")
+    other_json = tmp_path / "autre" / "relocalise.metadata.json"
+    other_json.write_text("{}", encoding="utf-8")
+
+    outcome = metadata_editor_adapter.MetadataEditorOutcome(status="saved", docx_path=other_docx, metadata_path=other_json)
+    monkeypatch.setattr(metadata_editor_adapter, "edit_metadata", lambda parent, docx, metadata: outcome)
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.docx_path = str(docx_path)
+    controller.form_state.metadata_path = ""
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    edit_button = _find_button(root, "Créer les métadonnées…")
+    edit_button.invoke()
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    assert entries[0].get() == str(other_docx)
+    assert entries[1].get() == str(other_json)
+    assert _find_button(root, "Modifier les métadonnées…") is not None
+
+
+def test_edit_metadata_cancelled_result_keeps_form_and_shows_no_error(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tkinter import messagebox
+
+    from chaine_editoriale import interface_publication as ip
+    from chaine_editoriale import metadata_editor_adapter
+
+    docx_path = tmp_path / "chapitre.docx"
+    docx_path.write_bytes(b"fake")
+    json_path = tmp_path / "chapitre.metadata.json"
+
+    outcome = metadata_editor_adapter.MetadataEditorOutcome(status="cancelled", docx_path=docx_path, metadata_path=None)
+    monkeypatch.setattr(metadata_editor_adapter, "edit_metadata", lambda parent, docx, metadata: outcome)
+    error_calls: list[tuple] = []
+    monkeypatch.setattr(messagebox, "showerror", lambda *args, **kwargs: error_calls.append(args))
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.docx_path = str(docx_path)
+    controller.form_state.metadata_path = str(json_path)
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    edit_button = _find_button(root, "Créer les métadonnées…")
+    edit_button.invoke()
+    root.update()
+
+    assert error_calls == []
+    entries = _widgets_by_class(root, "TEntry")
+    assert entries[0].get() == str(docx_path)
+    assert entries[1].get() == str(json_path)
+
+
+def test_choose_other_json_updates_field_without_opening_editor(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chaine_editoriale import interface_publication as ip
+    from chaine_editoriale import metadata_editor_adapter
+
+    docx_path = tmp_path / "chapitre.docx"
+    docx_path.write_bytes(b"fake")
+    other_json = tmp_path / "ailleurs.metadata.json"
+    other_json.write_text("{}", encoding="utf-8")
+
+    edit_calls: list[object] = []
+    monkeypatch.setattr(
+        metadata_editor_adapter, "edit_metadata", lambda parent, docx, metadata: edit_calls.append(1) or None
+    )
+    monkeypatch.setattr("tkinter.filedialog.askopenfilename", lambda **kwargs: str(other_json))
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.docx_path = str(docx_path)
+    controller.form_state.metadata_path = ""
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    choose_button = _find_button(root, "Choisir un autre JSON…")
+    choose_button.invoke()
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    assert entries[1].get() == str(other_json)
+    assert edit_calls == []
+    assert _find_button(root, "Modifier les métadonnées…") is not None
+
+
+def test_metadata_buttons_disabled_while_busy_and_reenabled_after(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from tkinter import messagebox
+
+    from chaine_editoriale import interface_publication as ip
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    fake_result = _fake_publication_result(tmp_path, output_dir)
+    monkeypatch.setattr(ip, "run_publication_job", lambda request: ip.PublicationJobEvent(kind="success", result=fake_result))
+    monkeypatch.setattr(messagebox, "askyesno", lambda *args, **kwargs: True)
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    docx_path = tmp_path / "doc.docx"
+    docx_path.write_bytes(b"fake")
+    metadata_path = tmp_path / "doc.json"
+    metadata_path.write_text("{}", encoding="utf-8")
+    entries[0].insert(0, str(docx_path))
+    entries[1].insert(0, str(metadata_path))
+    entries[2].insert(0, str(tmp_path / "ws"))
+    entries[3].insert(0, str(output_dir))
+    root.update()
+
+    publish_button = _find_button(root, "Publier")
+    publish_button.invoke()
+    root.update()
+
+    edit_button = _find_button(root, "Créer les métadonnées…")
+    choose_button = _find_button(root, "Choisir un autre JSON…")
+    assert str(edit_button.cget("state")) == "disabled"
+    assert str(choose_button.cget("state")) == "disabled"
+
+    deadline = time.time() + 5
+    while controller.busy and time.time() < deadline:
+        root.update()
+        time.sleep(0.02)
+    assert not controller.busy
+
+    edit_button_after = _find_button(root, "Modifier les métadonnées…")
+    choose_button_after = _find_button(root, "Choisir un autre JSON…")
+    assert str(edit_button_after.cget("state")) == "normal"
+    assert str(choose_button_after.cget("state")) == "normal"
+
+
+def test_metadata_presentation_survives_screen_rebuild(tk_root, tmp_path: Path) -> None:
+    from chaine_editoriale import interface_publication as ip
+
+    docx_path = tmp_path / "chapitre.docx"
+    docx_path.write_bytes(b"fake")
+    json_path = tmp_path / "chapitre.metadata.json"
+    json_path.write_text("{}", encoding="utf-8")
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.docx_path = str(docx_path)
+    controller.form_state.metadata_path = str(json_path)
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+    assert _find_button(root, "Modifier les métadonnées…") is not None
+
+    for child in list(root.winfo_children()):
+        child.destroy()
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+    assert _find_button(root, "Modifier les métadonnées…") is not None
+    entries = _widgets_by_class(root, "TEntry")
+    assert entries[0].get() == str(docx_path)
+    assert entries[1].get() == str(json_path)
+
+
 def _fake_publication_result(tmp_path: Path, output_dir: Path):
     from dataclasses import dataclass
 

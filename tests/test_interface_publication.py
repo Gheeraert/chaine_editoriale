@@ -875,3 +875,109 @@ def test_publication_form_to_worker_end_to_end(
     for action in actions:
         ip.open_artifact(action.path)
     assert len(opened) == len(actions)
+
+
+# ---------------------------------------------------------------------------
+# describe_metadata_path() : presentation pure du parcours creer/modifier
+
+
+def test_describe_metadata_path_no_docx() -> None:
+    presentation = ip.describe_metadata_path("", "")
+    assert presentation.state == "no_docx"
+    assert presentation.can_edit is False
+    assert "DOCX" in presentation.status_text
+
+
+def test_describe_metadata_path_conventional_missing(tmp_path: Path) -> None:
+    docx = tmp_path / "chapitre.docx"
+    conventional_json = tmp_path / "chapitre.metadata.json"
+    presentation = ip.describe_metadata_path(str(docx), str(conventional_json))
+    assert presentation.state == "missing"
+    assert presentation.can_edit is True
+    assert presentation.editor_button_text == "Créer les métadonnées…"
+    assert "chapitre.metadata.json" in presentation.status_text
+
+
+def test_describe_metadata_path_empty_metadata_field_with_docx() -> None:
+    presentation = ip.describe_metadata_path("C:/livre/chapitre.docx", "")
+    assert presentation.state == "missing"
+    assert presentation.can_edit is True
+    assert presentation.editor_button_text == "Créer les métadonnées…"
+
+
+def test_describe_metadata_path_existing_json(tmp_path: Path) -> None:
+    docx = tmp_path / "chapitre.docx"
+    json_path = tmp_path / "chapitre.metadata.json"
+    json_path.write_text("{}", encoding="utf-8")
+    presentation = ip.describe_metadata_path(str(docx), str(json_path))
+    assert presentation.state == "available"
+    assert presentation.can_edit is True
+    assert presentation.editor_button_text == "Modifier les métadonnées…"
+    assert "chapitre.metadata.json" in presentation.status_text
+
+
+def test_describe_metadata_path_directory_instead_of_file(tmp_path: Path) -> None:
+    docx = tmp_path / "chapitre.docx"
+    a_directory = tmp_path / "chapitre.metadata.json"
+    a_directory.mkdir()
+    presentation = ip.describe_metadata_path(str(docx), str(a_directory))
+    assert presentation.state == "invalid_path"
+    assert presentation.can_edit is False
+
+
+def test_describe_metadata_path_wrong_extension(tmp_path: Path) -> None:
+    docx = tmp_path / "chapitre.docx"
+    wrong_file = tmp_path / "chapitre.txt"
+    wrong_file.write_text("x", encoding="utf-8")
+    presentation = ip.describe_metadata_path(str(docx), str(wrong_file))
+    assert presentation.state == "invalid_path"
+    assert presentation.can_edit is False
+    assert "JSON" in presentation.status_text
+
+
+def test_describe_metadata_path_normalizes_surrounding_spaces(tmp_path: Path) -> None:
+    docx = tmp_path / "chapitre.docx"
+    json_path = tmp_path / "chapitre.metadata.json"
+    json_path.write_text("{}", encoding="utf-8")
+    presentation = ip.describe_metadata_path(f"  {docx}  ", f"  {json_path}  ")
+    assert presentation.state == "available"
+
+
+def test_docx_change_resets_metadata_true_on_different_path() -> None:
+    assert ip.docx_change_resets_metadata("C:/a/un.docx", "C:/a/deux.docx") is True
+
+
+def test_docx_change_resets_metadata_false_on_identical_path_with_spaces() -> None:
+    assert ip.docx_change_resets_metadata("C:/a/un.docx", "  C:/a/un.docx  ") is False
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic de publication quand les metadonnees restent a creer
+
+
+def test_validate_publication_form_metadata_not_yet_created_with_valid_docx(
+    tmp_path: Path, minimal_docx_path: Path
+) -> None:
+    state = ip.PublicationFormState(
+        docx_path=str(minimal_docx_path),
+        metadata_path=str(tmp_path / "absent.metadata.json"),
+        workspace_dir=str(tmp_path / "ws"),
+        output_dir=str(tmp_path / "out"),
+    )
+    issues = ip.validate_publication_form(state)
+    matching = [issue for issue in issues if issue.field == "metadata_path"]
+    assert matching, issues
+    assert "Créer les métadonnées" in matching[0].message
+
+
+def test_validate_publication_form_metadata_missing_without_valid_docx(tmp_path: Path) -> None:
+    state = ip.PublicationFormState(
+        docx_path="",
+        metadata_path=str(tmp_path / "absent.json"),
+        workspace_dir=str(tmp_path / "ws"),
+        output_dir=str(tmp_path / "out"),
+    )
+    issues = ip.validate_publication_form(state)
+    matching = [issue for issue in issues if issue.field == "metadata_path"]
+    assert matching, issues
+    assert "introuvable" in matching[0].message

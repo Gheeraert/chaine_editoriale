@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import interface_publication as ip
+from . import metadata_editor_adapter
 from .configuration import (
     ChaineConfig,
     DependencyVerification,
@@ -27,7 +28,7 @@ from .configuration import (
     today_iso,
     write_config,
 )
-from .erreurs import ConfigurationError
+from .erreurs import ConfigurationError, MetadataEditorIntegrationError
 
 SUGGESTED_MINI_METOPES_PATH = r"C:\minimetopes"
 SUGGESTED_PURH_SITE_PATH = r"C:\impression2"
@@ -190,6 +191,46 @@ def _build_publication_screen(
     output_var = tk.StringVar(value=form_state.output_dir)
     output_mode_var = tk.StringVar(value=ip.output_mode_label(form_state.output_mode))
     latex_engine_var = tk.StringVar(value=ip.latex_engine_label(form_state.latex_engine))
+    metadata_status_var = tk.StringVar(value="")
+
+    # Dernier DOCX pour lequel le chemin de metadonnees a ete synchronise
+    # (calcul du chemin conventionnel). Une simple re-saisie identique (focus
+    # sans modification) ne doit jamais reinitialiser un JSON deja choisi.
+    last_synced_docx = [docx_var.get()]
+
+    def refresh_metadata_presentation() -> None:
+        presentation = ip.describe_metadata_path(docx_var.get(), metadata_var.get())
+        metadata_status_var.set(presentation.status_text)
+        primary_metadata_button.configure(text=presentation.editor_button_text)
+        if screen_controller.busy:
+            primary_metadata_button.configure(state="disabled")
+            choose_other_json_button.configure(state="disabled")
+        else:
+            primary_metadata_button.configure(state=("normal" if presentation.can_edit else "disabled"))
+            choose_other_json_button.configure(state=("normal" if presentation.state != "no_docx" else "disabled"))
+
+    def apply_conventional_metadata_path(docx_value: str) -> None:
+        text = docx_value.strip()
+        if not text:
+            metadata_var.set("")
+            refresh_metadata_presentation()
+            return
+        docx_path = ip.normalized_path(docx_value)
+        try:
+            conventional_path = metadata_editor_adapter.conventional_metadata_path(docx_path)
+        except MetadataEditorIntegrationError as error:
+            messagebox.showerror("Mini-Métopes indisponible", str(error), parent=root)
+            refresh_metadata_presentation()
+            return
+        metadata_var.set(str(conventional_path))
+        refresh_metadata_presentation()
+
+    def sync_docx_if_changed() -> None:
+        current = docx_var.get()
+        if not ip.docx_change_resets_metadata(last_synced_docx[0], current):
+            return
+        last_synced_docx[0] = current
+        apply_conventional_metadata_path(current)
 
     def browse_docx() -> None:
         initial = ip.initial_directory_for(docx_var.get())
@@ -201,6 +242,8 @@ def _build_publication_screen(
         if not selected:
             return
         docx_var.set(selected)
+        last_synced_docx[0] = selected
+        apply_conventional_metadata_path(selected)
         if not workspace_var.get().strip() and not output_var.get().strip():
             suggested_workspace, suggested_output = ip.suggest_workspace_and_output_dirs(Path(selected))
             workspace_var.set(suggested_workspace)
@@ -215,6 +258,59 @@ def _build_publication_screen(
         )
         if selected:
             metadata_var.set(selected)
+            refresh_metadata_presentation()
+
+    def on_edit_metadata() -> None:
+        if screen_controller.busy:
+            return
+        sync_docx_if_changed()
+
+        docx_text = docx_var.get().strip()
+        if not docx_text:
+            messagebox.showerror(
+                "Document DOCX requis", "Choisissez d'abord un document DOCX.", parent=root
+            )
+            return
+        docx_path = ip.normalized_path(docx_var.get())
+        if not docx_path.exists() or not docx_path.is_file() or docx_path.suffix.lower() != ".docx":
+            messagebox.showerror(
+                "Document DOCX invalide",
+                f"Le document DOCX est introuvable ou invalide :\n{docx_path}",
+                parent=root,
+            )
+            return
+
+        metadata_text = metadata_var.get().strip()
+        if metadata_text:
+            metadata_path: Path | None = ip.normalized_path(metadata_var.get())
+        else:
+            try:
+                metadata_path = metadata_editor_adapter.conventional_metadata_path(docx_path)
+            except MetadataEditorIntegrationError as error:
+                messagebox.showerror("Mini-Métopes indisponible", str(error), parent=root)
+                return
+
+        try:
+            outcome = metadata_editor_adapter.edit_metadata(root, docx_path, metadata_path)
+        except MetadataEditorIntegrationError as error:
+            messagebox.showerror("Mini-Métopes indisponible", str(error), parent=root)
+            return
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Document ou fichier invalide", str(error), parent=root)
+            return
+        except Exception as error:  # noqa: BLE001 - jamais de trace brute affichee a l'utilisateur.
+            ip.log_unexpected_error(error)
+            messagebox.showerror("Erreur inattendue", f"{type(error).__name__} : {error}", parent=root)
+            return
+
+        if outcome.status == "cancelled":
+            refresh_metadata_presentation()
+            return
+
+        docx_var.set(str(outcome.docx_path))
+        last_synced_docx[0] = str(outcome.docx_path)
+        metadata_var.set(str(outcome.metadata_path))
+        refresh_metadata_presentation()
 
     def browse_workspace() -> None:
         initial = ip.initial_directory_for(workspace_var.get(), docx_var.get())
@@ -234,13 +330,26 @@ def _build_publication_screen(
     docx_entry.grid(row=row, column=1, sticky="we", padx=(8, 8))
     docx_browse_button = ttk.Button(frame, text="Parcourir…", command=browse_docx)
     docx_browse_button.grid(row=row, column=2)
+    docx_entry.bind("<FocusOut>", lambda _event: sync_docx_if_changed())
     row += 1
 
-    ttk.Label(frame, text="Métadonnées JSON").grid(row=row, column=0, sticky="w", pady=2)
+    ttk.Label(frame, text="Métadonnées").grid(row=row, column=0, sticky="nw", pady=2)
     metadata_entry = ttk.Entry(frame, textvariable=metadata_var)
     metadata_entry.grid(row=row, column=1, sticky="we", padx=(8, 8))
-    metadata_browse_button = ttk.Button(frame, text="Parcourir…", command=browse_metadata)
-    metadata_browse_button.grid(row=row, column=2)
+    primary_metadata_button = ttk.Button(frame, text="Créer les métadonnées…", command=on_edit_metadata)
+    primary_metadata_button.grid(row=row, column=2, sticky="w")
+    row += 1
+
+    metadata_actions_frame = ttk.Frame(frame)
+    metadata_actions_frame.grid(row=row, column=1, columnspan=2, sticky="w")
+    choose_other_json_button = ttk.Button(
+        metadata_actions_frame, text="Choisir un autre JSON…", command=browse_metadata
+    )
+    choose_other_json_button.pack(side="left")
+    row += 1
+
+    metadata_status_label = ttk.Label(frame, textvariable=metadata_status_var, justify="left")
+    metadata_status_label.grid(row=row, column=1, columnspan=2, sticky="w", pady=(0, 4))
     row += 1
 
     ttk.Label(frame, text="Dossier de travail").grid(row=row, column=0, sticky="w", pady=2)
@@ -290,7 +399,7 @@ def _build_publication_screen(
         "output_mode": output_mode_combo,
         "latex_engine": latex_engine_combo,
     }
-    browse_buttons = (docx_browse_button, metadata_browse_button, workspace_browse_button, output_browse_button)
+    browse_buttons = (docx_browse_button, workspace_browse_button, output_browse_button)
 
     def sync_form_state_from_widgets() -> None:
         """Reporter les valeurs visibles des widgets vers form_state.
@@ -338,6 +447,11 @@ def _build_publication_screen(
             latex_engine_combo.configure(state="disabled")
         publish_button.configure(state=state)
         config_button.configure(state=state)
+        if enabled:
+            refresh_metadata_presentation()
+        else:
+            primary_metadata_button.configure(state="disabled")
+            choose_other_json_button.configure(state="disabled")
 
     def clear_report() -> None:
         for child in report_frame.winfo_children():
@@ -481,6 +595,7 @@ def _build_publication_screen(
 
     publish_button.configure(command=on_publish)
     on_output_mode_change()
+    refresh_metadata_presentation()
 
     # tk.Variable ne conserve que le nom de la variable Tcl cote widget : sans
     # reference Python vivante, le garbage collector appelle Variable.__del__
@@ -491,6 +606,7 @@ def _build_publication_screen(
     frame.publication_form_vars = (
         docx_var,
         metadata_var,
+        metadata_status_var,
         workspace_var,
         output_var,
         output_mode_var,

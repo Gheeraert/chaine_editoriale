@@ -111,6 +111,36 @@ version). Il demande quatre chemins :
 - le **dossier de publication** : ou `purh_site.SiteBuilder` ecrit le site
   fini (`index.html`, `book.normalized.xml`, LaTEI/PDF eventuels).
 
+### Creer ou modifier les metadonnees, sans quitter l'application
+
+Le parcours normal est : **choisir un DOCX** -> **creer ou modifier les
+metadonnees** -> **publier**. Lors d'une premiere publication, le fichier
+JSON de metadonnees n'existe pas encore ; il n'est plus necessaire de le
+fabriquer en dehors de l'application.
+
+Des qu'un DOCX est choisi, `chaine_editoriale` calcule le chemin
+conventionnel du JSON associe (`document.docx` -> `document.metadata.json`),
+via `mini_metopes.metadata.default_metadata_path` (source de verite unique,
+jamais recopiee). Ce chemin est affiche immediatement, meme si le fichier
+n'existe pas encore : le bouton devient `Creer les metadonnees...`. Si un
+fichier JSON existe deja a cet emplacement, il est detecte automatiquement
+et le bouton devient `Modifier les metadonnees...`.
+
+Cliquer sur ce bouton ouvre l'editeur de metadonnees de Mini-Metopes
+(`mini_metopes.gui.open_metadata_editor`) comme une **boite modale integree**
+a la meme fenetre (aucune nouvelle fenetre principale, aucun sous-processus).
+A sa fermeture, la chaine editoriale recupere les **deux chemins reellement
+retournes** (DOCX et JSON), car l'editeur peut relocaliser le DOCX ou charger
+un autre couple DOCX/JSON. Une annulation conserve simplement le formulaire
+tel quel, sans afficher d'erreur.
+
+Le bouton `Choisir un autre JSON...` reste disponible pour associer un JSON
+enregistre ailleurs (document deplace, reprise de travail existante) sans
+ouvrir l'editeur automatiquement.
+
+Le JSON reste un fichier reel sur disque a cote du DOCX (ou a l'emplacement
+choisi) : rien n'est jamais cache dans un etat interne opaque.
+
 Trois modes de sortie sont proposes :
 
 | Libelle affiche                              | `pdf_export_mode` |
