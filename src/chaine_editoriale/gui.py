@@ -239,9 +239,16 @@ def _build_publication_screen(
         Ne fait rien si le DOCX n'a pas change depuis la derniere
         synchronisation (une re-saisie identique, ou un simple focus sans
         modification, ne doit jamais reinitialiser un JSON deja choisi). Ne
-        recalcule le chemin que si ``form_state.metadata_path_is_automatic``
-        est vrai : un JSON choisi explicitement (bouton "Choisir un autre
-        JSON..." ou retour "saved" de Mini-Metopes) n'est jamais ecrase.
+        touche au JSON que si ``form_state.metadata_path_is_automatic`` est
+        vrai : un JSON choisi explicitement (bouton "Choisir un autre
+        JSON..." ou retour "saved" de Mini-Metopes) n'est jamais ecrase, ni
+        efface, ni recalcule.
+
+        En mode automatique, l'ancien chemin est efface immediatement des
+        qu'un changement reel de DOCX est detecte, avant meme de tenter le
+        calcul du nouveau chemin : si ce calcul echoue (DOCX invalide, Mini-
+        Metopes indisponible), le champ doit rester vide plutot que de
+        continuer a afficher un JSON qui appartient a l'ancien document.
 
         Silencieuse par conception : aucune boite d'erreur n'est montree ici,
         que le DOCX soit vide/invalide ou que Mini-Metopes soit indisponible.
@@ -253,14 +260,16 @@ def _build_publication_screen(
         if not ip.docx_change_resets_metadata(last_synced_docx[0], current):
             return
         last_synced_docx[0] = current
-        if form_state.metadata_path_is_automatic and ip.docx_is_usable_for_metadata_sync(current):
-            docx_path = ip.normalized_path(current)
-            try:
-                conventional_path = metadata_editor_adapter.conventional_metadata_path(docx_path)
-            except MetadataEditorIntegrationError:
-                conventional_path = None
-            if conventional_path is not None:
-                metadata_var.set(str(conventional_path))
+        if form_state.metadata_path_is_automatic:
+            metadata_var.set("")
+            if ip.docx_is_usable_for_metadata_sync(current):
+                docx_path = ip.normalized_path(current)
+                try:
+                    conventional_path = metadata_editor_adapter.conventional_metadata_path(docx_path)
+                except MetadataEditorIntegrationError:
+                    conventional_path = None
+                if conventional_path is not None:
+                    metadata_var.set(str(conventional_path))
         refresh_metadata_presentation()
 
     def browse_docx() -> None:
@@ -368,7 +377,12 @@ def _build_publication_screen(
     row += 1
 
     ttk.Label(frame, text="Métadonnées").grid(row=row, column=0, sticky="nw", pady=2)
-    metadata_entry = ttk.Entry(frame, textvariable=metadata_var)
+    # Lecture seule : le chemin reste visible/selectionnable, mais sa
+    # modification ne passe que par Creer/Modifier les metadonnees... ou
+    # Choisir un autre JSON..., jamais par une saisie/collage direct qui
+    # laisserait metadata_path_is_automatic incoherent avec le contenu reel
+    # du champ (defaut 1).
+    metadata_entry = ttk.Entry(frame, textvariable=metadata_var, state="readonly")
     metadata_entry.grid(row=row, column=1, sticky="we", padx=(8, 8))
     primary_metadata_button = ttk.Button(frame, text="Créer les métadonnées…", command=on_edit_metadata)
     primary_metadata_button.grid(row=row, column=2, sticky="w")
@@ -469,8 +483,11 @@ def _build_publication_screen(
 
     def set_form_enabled(enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for entry in (docx_entry, metadata_entry, workspace_entry, output_entry):
+        for entry in (docx_entry, workspace_entry, output_entry):
             entry.configure(state=state)
+        # Le champ JSON n'est jamais "normal" : lecture seule tant que le
+        # formulaire est disponible, desactive pendant une publication.
+        metadata_entry.configure(state=("readonly" if enabled else "disabled"))
         for button in browse_buttons:
             button.configure(state=state)
         combo_state = "disabled" if not enabled else "readonly"

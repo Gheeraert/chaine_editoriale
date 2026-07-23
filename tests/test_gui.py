@@ -440,31 +440,28 @@ def test_publication_screen_artifact_buttons_span_multiple_rows(
     # directory_is_non_empty()/validate_publication_form().
     monkeypatch.setattr(messagebox, "askyesno", lambda *args, **kwargs: True)
 
-    root = tk_root
-    for child in list(root.winfo_children()):
-        child.destroy()
-    controller = ip.PublicationScreenController()
-    gui._build_publication_screen(root, controller, lambda: None)
-    root.update()
-
-    entries = _widgets_by_class(root, "TEntry")
     docx_path = tmp_path / "doc.docx"
     docx_path.write_bytes(b"fake")
     metadata_path = tmp_path / "doc.json"
     metadata_path.write_text("{}", encoding="utf-8")
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    # Le champ JSON est desormais readonly : un chemin explicite se prepare
+    # sur form_state avant construction de l'ecran (equivalent a un retour de
+    # "Choisir un autre JSON..."), jamais par insertion directe dans le widget.
+    controller.form_state.metadata_path = str(metadata_path)
+    controller.form_state.metadata_path_is_automatic = False
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
     entries[0].insert(0, str(docx_path))
-    entries[1].insert(0, str(metadata_path))
     entries[2].insert(0, str(tmp_path / "ws"))
     entries[3].insert(0, str(output_dir))
     root.update()
-
-    # Ce test verifie l'affichage des boutons d'ouverture apres succes, pas la
-    # synchronisation JSON automatique/explicite (defaut 1) : le JSON saisi
-    # ici (doc.json) n'est pas le chemin conventionnel de doc.docx
-    # (doc.metadata.json), donc il doit etre marque explicite pour ne pas
-    # etre recalcule et invalide par synchronize_metadata_path_for_current_docx()
-    # avant la publication.
-    controller.form_state.metadata_path_is_automatic = False
 
     publish_button = next(button for button in _widgets_by_class(root, "TButton") if button.cget("text") == "Publier")
     publish_button.invoke()
@@ -698,29 +695,28 @@ def test_metadata_buttons_disabled_while_busy_and_reenabled_after(
     monkeypatch.setattr(ip, "run_publication_job", lambda request: ip.PublicationJobEvent(kind="success", result=fake_result))
     monkeypatch.setattr(messagebox, "askyesno", lambda *args, **kwargs: True)
 
-    root = tk_root
-    for child in list(root.winfo_children()):
-        child.destroy()
-    controller = ip.PublicationScreenController()
-    gui._build_publication_screen(root, controller, lambda: None)
-    root.update()
-
-    entries = _widgets_by_class(root, "TEntry")
     docx_path = tmp_path / "doc.docx"
     docx_path.write_bytes(b"fake")
     metadata_path = tmp_path / "doc.json"
     metadata_path.write_text("{}", encoding="utf-8")
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    # Le champ JSON est desormais readonly : un chemin explicite se prepare
+    # sur form_state avant construction de l'ecran plutot que par insertion
+    # directe dans le widget.
+    controller.form_state.metadata_path = str(metadata_path)
+    controller.form_state.metadata_path_is_automatic = False
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
     entries[0].insert(0, str(docx_path))
-    entries[1].insert(0, str(metadata_path))
     entries[2].insert(0, str(tmp_path / "ws"))
     entries[3].insert(0, str(output_dir))
     root.update()
-
-    # Le JSON saisi ici (doc.json) n'est pas le chemin conventionnel de
-    # doc.docx : le marquer explicite evite qu'il soit recalcule (et rendu
-    # invalide) par synchronize_metadata_path_for_current_docx() avant
-    # publication (defaut 1).
-    controller.form_state.metadata_path_is_automatic = False
 
     publish_button = _find_button(root, "Publier")
     publish_button.invoke()
@@ -949,6 +945,268 @@ def test_metadata_path_is_automatic_flag_survives_rebuild(tk_root, tmp_path: Pat
     gui._build_publication_screen(root, controller, lambda: None)
     root.update()
     assert controller.form_state.metadata_path_is_automatic is False
+
+
+# ---------------------------------------------------------------------------
+# Champ JSON en lecture seule (defaut 1)
+
+
+def test_metadata_entry_is_readonly_at_startup(tk_root) -> None:
+    from chaine_editoriale import interface_publication as ip
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    assert str(entries[1].cget("state")) == "readonly"
+
+
+def test_metadata_entry_disabled_during_publication(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+    from tkinter import messagebox
+
+    from chaine_editoriale import interface_publication as ip
+
+    docx_path = tmp_path / "doc.docx"
+    docx_path.write_bytes(b"fake")
+    metadata_path = tmp_path / "doc.json"
+    metadata_path.write_text("{}", encoding="utf-8")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    fake_result = _fake_publication_result(tmp_path, output_dir)
+    monkeypatch.setattr(ip, "run_publication_job", lambda request: ip.PublicationJobEvent(kind="success", result=fake_result))
+    monkeypatch.setattr(messagebox, "askyesno", lambda *args, **kwargs: True)
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.metadata_path = str(metadata_path)
+    controller.form_state.metadata_path_is_automatic = False
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    entries[0].insert(0, str(docx_path))
+    entries[2].insert(0, str(tmp_path / "ws"))
+    entries[3].insert(0, str(output_dir))
+    root.update()
+
+    publish_button = _find_button(root, "Publier")
+    publish_button.invoke()
+    root.update()
+
+    assert str(entries[1].cget("state")) == "disabled"
+
+    deadline = time.time() + 5
+    while controller.busy and time.time() < deadline:
+        root.update()
+        time.sleep(0.02)
+    assert not controller.busy
+
+
+def test_metadata_entry_readonly_after_publication_completes(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ni "normal" ni "disabled" ne doivent subsister apres le retour a l'etat disponible."""
+    import time
+    from tkinter import messagebox
+
+    from chaine_editoriale import interface_publication as ip
+
+    docx_path = tmp_path / "doc.docx"
+    docx_path.write_bytes(b"fake")
+    metadata_path = tmp_path / "doc.json"
+    metadata_path.write_text("{}", encoding="utf-8")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    fake_result = _fake_publication_result(tmp_path, output_dir)
+    monkeypatch.setattr(ip, "run_publication_job", lambda request: ip.PublicationJobEvent(kind="success", result=fake_result))
+    monkeypatch.setattr(messagebox, "askyesno", lambda *args, **kwargs: True)
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.metadata_path = str(metadata_path)
+    controller.form_state.metadata_path_is_automatic = False
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    entries[0].insert(0, str(docx_path))
+    entries[2].insert(0, str(tmp_path / "ws"))
+    entries[3].insert(0, str(output_dir))
+    root.update()
+
+    publish_button = _find_button(root, "Publier")
+    publish_button.invoke()
+    root.update()
+
+    deadline = time.time() + 5
+    while controller.busy and time.time() < deadline:
+        root.update()
+        time.sleep(0.02)
+    assert not controller.busy
+
+    entries_after = _widgets_by_class(root, "TEntry")
+    state_after = str(entries_after[1].cget("state"))
+    assert state_after == "readonly"
+    assert state_after not in ("normal", "disabled")
+
+
+# ---------------------------------------------------------------------------
+# Effacement de l'ancien JSON automatique avant recalcul (defaut 2)
+
+
+def test_synchronize_clears_old_automatic_json_when_conventional_computation_fails(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chaine_editoriale import interface_publication as ip
+    from chaine_editoriale import metadata_editor_adapter
+    from chaine_editoriale.erreurs import MetadataEditorIntegrationError
+
+    docx1 = tmp_path / "livre1.docx"
+    docx1.write_bytes(b"fake")
+    metadata1 = tmp_path / "livre1.metadata.json"
+    metadata1.write_text("{}", encoding="utf-8")
+    docx2 = tmp_path / "livre2.docx"
+    docx2.write_bytes(b"fake")
+
+    def _failing_conventional(docx_path: Path) -> Path:
+        raise MetadataEditorIntegrationError("Mini-Metopes indisponible (simule)")
+
+    monkeypatch.setattr(metadata_editor_adapter, "conventional_metadata_path", _failing_conventional)
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.docx_path = str(docx1)
+    controller.form_state.metadata_path = str(metadata1)
+    controller.form_state.metadata_path_is_automatic = True
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    entries[0].delete(0, "end")
+    entries[0].insert(0, str(docx2))
+    entries[0].event_generate("<FocusOut>")
+    root.update()
+
+    assert entries[1].get() == ""
+    assert entries[1].get() != str(metadata1)
+
+
+def test_synchronize_clears_automatic_json_for_invalid_docx(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chaine_editoriale import interface_publication as ip
+
+    docx1 = tmp_path / "livre1.docx"
+    docx1.write_bytes(b"fake")
+    metadata1 = tmp_path / "livre1.metadata.json"
+    metadata1.write_text("{}", encoding="utf-8")
+
+    invalid_docx_value = str(tmp_path / "absent.docx")
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.docx_path = str(docx1)
+    controller.form_state.metadata_path = str(metadata1)
+    controller.form_state.metadata_path_is_automatic = True
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    entries[0].delete(0, "end")
+    entries[0].insert(0, invalid_docx_value)
+    entries[0].event_generate("<FocusOut>")
+    root.update()
+
+    assert entries[1].get() == ""
+
+
+def test_synchronize_preserves_explicit_json_and_never_calls_conventional_path(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chaine_editoriale import interface_publication as ip
+    from chaine_editoriale import metadata_editor_adapter
+    from chaine_editoriale.erreurs import MetadataEditorIntegrationError
+
+    docx1 = tmp_path / "livre1.docx"
+    docx1.write_bytes(b"fake")
+    docx2 = tmp_path / "livre2.docx"
+    docx2.write_bytes(b"fake")
+    explicit_json = tmp_path / "ailleurs" / "explicit.metadata.json"
+    explicit_json.parent.mkdir()
+    explicit_json.write_text("{}", encoding="utf-8")
+
+    calls: list[Path] = []
+
+    def _failing_conventional(docx_path: Path) -> Path:
+        calls.append(docx_path)
+        raise MetadataEditorIntegrationError("ne devrait jamais etre appelee")
+
+    monkeypatch.setattr(metadata_editor_adapter, "conventional_metadata_path", _failing_conventional)
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.docx_path = str(docx1)
+    controller.form_state.metadata_path = str(explicit_json)
+    controller.form_state.metadata_path_is_automatic = False
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    entries[0].delete(0, "end")
+    entries[0].insert(0, str(docx2))
+    entries[0].event_generate("<FocusOut>")
+    root.update()
+
+    assert calls == []
+    assert entries[1].get() == str(explicit_json)
+
+
+# ---------------------------------------------------------------------------
+# Reconstruction : le champ reste readonly (defaut 1)
+
+
+def test_metadata_entry_stays_readonly_after_rebuild(tk_root, tmp_path: Path) -> None:
+    from chaine_editoriale import interface_publication as ip
+
+    json_path = tmp_path / "chapitre.metadata.json"
+    json_path.write_text("{}", encoding="utf-8")
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.metadata_path = str(json_path)
+    controller.form_state.metadata_path_is_automatic = False
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+    assert controller.form_state.metadata_path_is_automatic is False
+
+    for child in list(root.winfo_children()):
+        child.destroy()
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    assert controller.form_state.metadata_path_is_automatic is False
+    entries = _widgets_by_class(root, "TEntry")
+    assert str(entries[1].cget("state")) == "readonly"
+    assert entries[1].get() == str(json_path)
 
 
 # ---------------------------------------------------------------------------
