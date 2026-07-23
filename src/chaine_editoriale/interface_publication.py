@@ -117,6 +117,14 @@ class PublicationFormState:
     output_dir: str = ""
     output_mode: str = DEFAULT_OUTPUT_MODE
     latex_engine: str = DEFAULT_LATEX_ENGINE
+    # True tant que metadata_path a ete calcule automatiquement (chemin
+    # conventionnel) et non choisi/enregistre explicitement par
+    # l'utilisateur : pilote si un changement de DOCX doit recalculer le JSON
+    # (cf. gui.synchronize_metadata_path_for_current_docx) ou le laisser
+    # intact. Vit sur form_state (pas dans une closure Tkinter) pour survivre
+    # a la reconstruction de l'ecran apres un aller-retour par la
+    # configuration.
+    metadata_path_is_automatic: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -590,7 +598,7 @@ def suggest_workspace_and_output_dirs(docx_path: Path) -> tuple[str, str]:
 # Fonctions pures : elles ne valident jamais le contenu JSON (responsabilite
 # de publier()/Mini-Metopes) et n'importent ni Tkinter ni mini_metopes.
 
-MetadataPathState = Literal["no_docx", "missing", "available", "invalid_path"]
+MetadataPathState = Literal["no_docx", "invalid_docx", "missing", "available", "invalid_metadata_path"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -608,11 +616,62 @@ _MODIFY_BUTTON_TEXT = "Modifier les métadonnées…"
 
 
 def describe_metadata_path(docx_value: str, metadata_value: str) -> MetadataPathPresentation:
-    """Decrire l'etat du chemin des metadonnees pour piloter le bouton dynamique et le statut."""
-    if not docx_value.strip():
+    """Decrire l'etat du chemin des metadonnees pour piloter le bouton dynamique et le statut.
+
+    Le DOCX est valide en premier (existence, type fichier, extension) : tant
+    qu'il ne l'est pas, l'edition des metadonnees reste desactivee (``state``
+    vaut ``"invalid_docx"``), meme si le champ metadonnees contient un texte
+    non vide.
+    """
+    docx_text = docx_value.strip()
+    if not docx_text:
         return MetadataPathPresentation(
             state="no_docx",
             status_text="Choisissez d'abord un document DOCX.",
+            editor_button_text=_CREATE_BUTTON_TEXT,
+            can_edit=False,
+        )
+
+    docx_path = normalized_path(docx_value)
+
+    try:
+        docx_exists = docx_path.exists()
+    except OSError as error:
+        return MetadataPathPresentation(
+            state="invalid_docx",
+            status_text=f"Le document DOCX est illisible : {docx_path}\n{error}",
+            editor_button_text=_CREATE_BUTTON_TEXT,
+            can_edit=False,
+        )
+    if not docx_exists:
+        return MetadataPathPresentation(
+            state="invalid_docx",
+            status_text="Le document DOCX est introuvable.",
+            editor_button_text=_CREATE_BUTTON_TEXT,
+            can_edit=False,
+        )
+
+    try:
+        docx_is_file = docx_path.is_file()
+    except OSError as error:
+        return MetadataPathPresentation(
+            state="invalid_docx",
+            status_text=f"Le document DOCX est illisible : {docx_path}\n{error}",
+            editor_button_text=_CREATE_BUTTON_TEXT,
+            can_edit=False,
+        )
+    if not docx_is_file:
+        return MetadataPathPresentation(
+            state="invalid_docx",
+            status_text="Le chemin DOCX ne désigne pas un fichier.",
+            editor_button_text=_CREATE_BUTTON_TEXT,
+            can_edit=False,
+        )
+
+    if docx_path.suffix.lower() != ".docx":
+        return MetadataPathPresentation(
+            state="invalid_docx",
+            status_text="Le document doit avoir l'extension .docx.",
             editor_button_text=_CREATE_BUTTON_TEXT,
             can_edit=False,
         )
@@ -631,7 +690,7 @@ def describe_metadata_path(docx_value: str, metadata_value: str) -> MetadataPath
 
     if path.suffix.lower() != ".json":
         return MetadataPathPresentation(
-            state="invalid_path",
+            state="invalid_metadata_path",
             status_text="Le chemin des métadonnées n'est pas un fichier JSON utilisable.",
             editor_button_text=_CREATE_BUTTON_TEXT,
             can_edit=False,
@@ -641,7 +700,7 @@ def describe_metadata_path(docx_value: str, metadata_value: str) -> MetadataPath
         exists = path.exists()
     except OSError as error:
         return MetadataPathPresentation(
-            state="invalid_path",
+            state="invalid_metadata_path",
             status_text=f"Le chemin des métadonnées est illisible : {path}\n{error}",
             editor_button_text=_CREATE_BUTTON_TEXT,
             can_edit=False,
@@ -659,7 +718,7 @@ def describe_metadata_path(docx_value: str, metadata_value: str) -> MetadataPath
         is_file = path.is_file()
     except OSError as error:
         return MetadataPathPresentation(
-            state="invalid_path",
+            state="invalid_metadata_path",
             status_text=f"Le chemin des métadonnées est illisible : {path}\n{error}",
             editor_button_text=_CREATE_BUTTON_TEXT,
             can_edit=False,
@@ -667,7 +726,7 @@ def describe_metadata_path(docx_value: str, metadata_value: str) -> MetadataPath
 
     if not is_file:
         return MetadataPathPresentation(
-            state="invalid_path",
+            state="invalid_metadata_path",
             status_text="Le chemin des métadonnées n'est pas un fichier JSON utilisable.",
             editor_button_text=_CREATE_BUTTON_TEXT,
             can_edit=False,
@@ -689,3 +748,25 @@ def docx_change_resets_metadata(previous_docx_value: str, new_docx_value: str) -
     deja choisi.
     """
     return normalized_path(previous_docx_value) != normalized_path(new_docx_value)
+
+
+def docx_is_usable_for_metadata_sync(docx_value: str) -> bool:
+    """True si le DOCX visible est exploitable pour calculer un chemin conventionnel.
+
+    Exige un texte non vide, un chemin existant, un fichier regulier et
+    l'extension ``.docx``. Utilisee par la synchronisation silencieuse
+    (``gui.synchronize_metadata_path_for_current_docx``) pour eviter d'appeler
+    l'adaptateur Mini-Metopes sur un DOCX vide ou invalide : la validation
+    normale (``validate_publication_form``) affichera ensuite le diagnostic
+    adapte.
+    """
+    text = docx_value.strip()
+    if not text:
+        return False
+    path = normalized_path(docx_value)
+    try:
+        if not path.exists() or not path.is_file():
+            return False
+    except OSError:
+        return False
+    return path.suffix.lower() == ".docx"

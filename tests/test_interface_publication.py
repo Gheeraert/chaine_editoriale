@@ -890,6 +890,7 @@ def test_describe_metadata_path_no_docx() -> None:
 
 def test_describe_metadata_path_conventional_missing(tmp_path: Path) -> None:
     docx = tmp_path / "chapitre.docx"
+    docx.write_bytes(b"fake")
     conventional_json = tmp_path / "chapitre.metadata.json"
     presentation = ip.describe_metadata_path(str(docx), str(conventional_json))
     assert presentation.state == "missing"
@@ -898,8 +899,10 @@ def test_describe_metadata_path_conventional_missing(tmp_path: Path) -> None:
     assert "chapitre.metadata.json" in presentation.status_text
 
 
-def test_describe_metadata_path_empty_metadata_field_with_docx() -> None:
-    presentation = ip.describe_metadata_path("C:/livre/chapitre.docx", "")
+def test_describe_metadata_path_empty_metadata_field_with_docx(tmp_path: Path) -> None:
+    docx = tmp_path / "chapitre.docx"
+    docx.write_bytes(b"fake")
+    presentation = ip.describe_metadata_path(str(docx), "")
     assert presentation.state == "missing"
     assert presentation.can_edit is True
     assert presentation.editor_button_text == "Créer les métadonnées…"
@@ -907,6 +910,7 @@ def test_describe_metadata_path_empty_metadata_field_with_docx() -> None:
 
 def test_describe_metadata_path_existing_json(tmp_path: Path) -> None:
     docx = tmp_path / "chapitre.docx"
+    docx.write_bytes(b"fake")
     json_path = tmp_path / "chapitre.metadata.json"
     json_path.write_text("{}", encoding="utf-8")
     presentation = ip.describe_metadata_path(str(docx), str(json_path))
@@ -918,25 +922,28 @@ def test_describe_metadata_path_existing_json(tmp_path: Path) -> None:
 
 def test_describe_metadata_path_directory_instead_of_file(tmp_path: Path) -> None:
     docx = tmp_path / "chapitre.docx"
+    docx.write_bytes(b"fake")
     a_directory = tmp_path / "chapitre.metadata.json"
     a_directory.mkdir()
     presentation = ip.describe_metadata_path(str(docx), str(a_directory))
-    assert presentation.state == "invalid_path"
+    assert presentation.state == "invalid_metadata_path"
     assert presentation.can_edit is False
 
 
 def test_describe_metadata_path_wrong_extension(tmp_path: Path) -> None:
     docx = tmp_path / "chapitre.docx"
+    docx.write_bytes(b"fake")
     wrong_file = tmp_path / "chapitre.txt"
     wrong_file.write_text("x", encoding="utf-8")
     presentation = ip.describe_metadata_path(str(docx), str(wrong_file))
-    assert presentation.state == "invalid_path"
+    assert presentation.state == "invalid_metadata_path"
     assert presentation.can_edit is False
     assert "JSON" in presentation.status_text
 
 
 def test_describe_metadata_path_normalizes_surrounding_spaces(tmp_path: Path) -> None:
     docx = tmp_path / "chapitre.docx"
+    docx.write_bytes(b"fake")
     json_path = tmp_path / "chapitre.metadata.json"
     json_path.write_text("{}", encoding="utf-8")
     presentation = ip.describe_metadata_path(f"  {docx}  ", f"  {json_path}  ")
@@ -949,6 +956,136 @@ def test_docx_change_resets_metadata_true_on_different_path() -> None:
 
 def test_docx_change_resets_metadata_false_on_identical_path_with_spaces() -> None:
     assert ip.docx_change_resets_metadata("C:/a/un.docx", "  C:/a/un.docx  ") is False
+
+
+# ---------------------------------------------------------------------------
+# describe_metadata_path() : DOCX invalide (defaut 2 - bouton actif a tort)
+
+
+def test_describe_metadata_path_docx_nonexistent(tmp_path: Path) -> None:
+    docx = tmp_path / "absent.docx"
+    presentation = ip.describe_metadata_path(str(docx), str(tmp_path / "absent.metadata.json"))
+    assert presentation.state == "invalid_docx"
+    assert presentation.can_edit is False
+    assert "introuvable" in presentation.status_text
+
+
+def test_describe_metadata_path_docx_is_a_directory(tmp_path: Path) -> None:
+    docx = tmp_path / "un-dossier"
+    docx.mkdir()
+    presentation = ip.describe_metadata_path(str(docx), str(tmp_path / "un-dossier.metadata.json"))
+    assert presentation.state == "invalid_docx"
+    assert presentation.can_edit is False
+    assert "fichier" in presentation.status_text
+
+
+def test_describe_metadata_path_docx_wrong_extension(tmp_path: Path) -> None:
+    docx = tmp_path / "livre.txt"
+    docx.write_text("pas un docx", encoding="utf-8")
+    presentation = ip.describe_metadata_path(str(docx), str(tmp_path / "livre.metadata.json"))
+    assert presentation.state == "invalid_docx"
+    assert presentation.can_edit is False
+    assert ".docx" in presentation.status_text
+
+
+@pytest.mark.parametrize(
+    "make_docx_value",
+    [
+        lambda tmp_path: str(tmp_path / "absent.docx"),
+        lambda tmp_path: str(_make_dir(tmp_path / "un-dossier")),
+        lambda tmp_path: str(_make_txt(tmp_path / "livre.txt")),
+    ],
+)
+def test_describe_metadata_path_can_edit_false_for_all_invalid_docx(tmp_path: Path, make_docx_value) -> None:
+    docx_value = make_docx_value(tmp_path)
+    presentation = ip.describe_metadata_path(docx_value, "")
+    assert presentation.state == "invalid_docx"
+    assert presentation.can_edit is False
+
+
+def _make_dir(path: Path) -> Path:
+    path.mkdir()
+    return path
+
+
+def _make_txt(path: Path) -> Path:
+    path.write_text("x", encoding="utf-8")
+    return path
+
+
+def test_describe_metadata_path_docx_valid_json_absent(tmp_path: Path) -> None:
+    docx = tmp_path / "chapitre.docx"
+    docx.write_bytes(b"fake")
+    presentation = ip.describe_metadata_path(str(docx), str(tmp_path / "chapitre.metadata.json"))
+    assert presentation.state == "missing"
+    assert presentation.can_edit is True
+
+
+def test_describe_metadata_path_docx_valid_json_present(tmp_path: Path) -> None:
+    docx = tmp_path / "chapitre.docx"
+    docx.write_bytes(b"fake")
+    json_path = tmp_path / "chapitre.metadata.json"
+    json_path.write_text("{}", encoding="utf-8")
+    presentation = ip.describe_metadata_path(str(docx), str(json_path))
+    assert presentation.state == "available"
+    assert presentation.can_edit is True
+
+
+def test_describe_metadata_path_docx_valid_json_invalid(tmp_path: Path) -> None:
+    docx = tmp_path / "chapitre.docx"
+    docx.write_bytes(b"fake")
+    wrong_file = tmp_path / "chapitre.txt"
+    wrong_file.write_text("x", encoding="utf-8")
+    presentation = ip.describe_metadata_path(str(docx), str(wrong_file))
+    assert presentation.state == "invalid_metadata_path"
+    assert presentation.can_edit is False
+
+
+# ---------------------------------------------------------------------------
+# docx_is_usable_for_metadata_sync()
+
+
+def test_docx_is_usable_for_metadata_sync_empty() -> None:
+    assert ip.docx_is_usable_for_metadata_sync("") is False
+    assert ip.docx_is_usable_for_metadata_sync("   ") is False
+
+
+def test_docx_is_usable_for_metadata_sync_nonexistent(tmp_path: Path) -> None:
+    assert ip.docx_is_usable_for_metadata_sync(str(tmp_path / "absent.docx")) is False
+
+
+def test_docx_is_usable_for_metadata_sync_directory(tmp_path: Path) -> None:
+    a_directory = tmp_path / "un-dossier"
+    a_directory.mkdir()
+    assert ip.docx_is_usable_for_metadata_sync(str(a_directory)) is False
+
+
+def test_docx_is_usable_for_metadata_sync_wrong_extension(tmp_path: Path) -> None:
+    wrong_file = tmp_path / "livre.txt"
+    wrong_file.write_text("x", encoding="utf-8")
+    assert ip.docx_is_usable_for_metadata_sync(str(wrong_file)) is False
+
+
+def test_docx_is_usable_for_metadata_sync_valid(tmp_path: Path) -> None:
+    docx = tmp_path / "chapitre.docx"
+    docx.write_bytes(b"fake")
+    assert ip.docx_is_usable_for_metadata_sync(str(docx)) is True
+
+
+# ---------------------------------------------------------------------------
+# PublicationFormState.metadata_path_is_automatic
+
+
+def test_publication_form_state_metadata_path_is_automatic_defaults_true() -> None:
+    assert ip.PublicationFormState().metadata_path_is_automatic is True
+
+
+def test_screen_controller_preserves_metadata_path_is_automatic_flag() -> None:
+    controller = ip.PublicationScreenController()
+    controller.form_state.metadata_path_is_automatic = False
+    controller.begin_publication()
+    controller.end_publication()
+    assert controller.form_state.metadata_path_is_automatic is False
 
 
 # ---------------------------------------------------------------------------

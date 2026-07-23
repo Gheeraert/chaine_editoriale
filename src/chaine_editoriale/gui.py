@@ -207,9 +207,17 @@ def _build_publication_screen(
             choose_other_json_button.configure(state="disabled")
         else:
             primary_metadata_button.configure(state=("normal" if presentation.can_edit else "disabled"))
-            choose_other_json_button.configure(state=("normal" if presentation.state != "no_docx" else "disabled"))
+            docx_is_valid = presentation.state not in ("no_docx", "invalid_docx")
+            choose_other_json_button.configure(state=("normal" if docx_is_valid else "disabled"))
 
     def apply_conventional_metadata_path(docx_value: str) -> None:
+        """Calculer et appliquer le chemin conventionnel pour une action explicite (Parcourir...).
+
+        Contrairement a ``synchronize_metadata_path_for_current_docx``, une
+        erreur Mini-Metopes est ici presentee a l'utilisateur : ce chemin
+        n'est emprunte que depuis une action explicite, jamais depuis un
+        simple changement de focus.
+        """
         text = docx_value.strip()
         if not text:
             metadata_var.set("")
@@ -225,12 +233,35 @@ def _build_publication_screen(
         metadata_var.set(str(conventional_path))
         refresh_metadata_presentation()
 
-    def sync_docx_if_changed() -> None:
+    def synchronize_metadata_path_for_current_docx() -> None:
+        """Recalculer silencieusement le JSON conventionnel si le DOCX visible a change.
+
+        Ne fait rien si le DOCX n'a pas change depuis la derniere
+        synchronisation (une re-saisie identique, ou un simple focus sans
+        modification, ne doit jamais reinitialiser un JSON deja choisi). Ne
+        recalcule le chemin que si ``form_state.metadata_path_is_automatic``
+        est vrai : un JSON choisi explicitement (bouton "Choisir un autre
+        JSON..." ou retour "saved" de Mini-Metopes) n'est jamais ecrase.
+
+        Silencieuse par conception : aucune boite d'erreur n'est montree ici,
+        que le DOCX soit vide/invalide ou que Mini-Metopes soit indisponible.
+        La validation explicite (``validate_publication_form``, ou une action
+        explicite comme "Creer/Modifier les metadonnees...") affichera ensuite
+        le diagnostic adapte.
+        """
         current = docx_var.get()
         if not ip.docx_change_resets_metadata(last_synced_docx[0], current):
             return
         last_synced_docx[0] = current
-        apply_conventional_metadata_path(current)
+        if form_state.metadata_path_is_automatic and ip.docx_is_usable_for_metadata_sync(current):
+            docx_path = ip.normalized_path(current)
+            try:
+                conventional_path = metadata_editor_adapter.conventional_metadata_path(docx_path)
+            except MetadataEditorIntegrationError:
+                conventional_path = None
+            if conventional_path is not None:
+                metadata_var.set(str(conventional_path))
+        refresh_metadata_presentation()
 
     def browse_docx() -> None:
         initial = ip.initial_directory_for(docx_var.get())
@@ -243,6 +274,7 @@ def _build_publication_screen(
             return
         docx_var.set(selected)
         last_synced_docx[0] = selected
+        form_state.metadata_path_is_automatic = True
         apply_conventional_metadata_path(selected)
         if not workspace_var.get().strip() and not output_var.get().strip():
             suggested_workspace, suggested_output = ip.suggest_workspace_and_output_dirs(Path(selected))
@@ -258,12 +290,13 @@ def _build_publication_screen(
         )
         if selected:
             metadata_var.set(selected)
+            form_state.metadata_path_is_automatic = False
             refresh_metadata_presentation()
 
     def on_edit_metadata() -> None:
         if screen_controller.busy:
             return
-        sync_docx_if_changed()
+        synchronize_metadata_path_for_current_docx()
 
         docx_text = docx_var.get().strip()
         if not docx_text:
@@ -310,6 +343,7 @@ def _build_publication_screen(
         docx_var.set(str(outcome.docx_path))
         last_synced_docx[0] = str(outcome.docx_path)
         metadata_var.set(str(outcome.metadata_path))
+        form_state.metadata_path_is_automatic = False
         refresh_metadata_presentation()
 
     def browse_workspace() -> None:
@@ -330,7 +364,7 @@ def _build_publication_screen(
     docx_entry.grid(row=row, column=1, sticky="we", padx=(8, 8))
     docx_browse_button = ttk.Button(frame, text="Parcourir…", command=browse_docx)
     docx_browse_button.grid(row=row, column=2)
-    docx_entry.bind("<FocusOut>", lambda _event: sync_docx_if_changed())
+    docx_entry.bind("<FocusOut>", lambda _event: synchronize_metadata_path_for_current_docx())
     row += 1
 
     ttk.Label(frame, text="Métadonnées").grid(row=row, column=0, sticky="nw", pady=2)
@@ -543,6 +577,7 @@ def _build_publication_screen(
             # un evenement en file d'attente juste avant la desactivation.
             return
 
+        synchronize_metadata_path_for_current_docx()
         sync_form_state_from_widgets()
 
         issues = ip.validate_publication_form(form_state)
