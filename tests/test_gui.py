@@ -1179,6 +1179,108 @@ def test_synchronize_preserves_explicit_json_and_never_calls_conventional_path(
 
 
 # ---------------------------------------------------------------------------
+# Effacement de l'ancien JSON avant tentative de calcul via "Parcourir..." (defaut 3)
+
+
+def test_browse_docx_clears_old_json_when_conventional_computation_fails(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un changement explicite de DOCX (bouton Parcourir...) ne doit jamais laisser
+    l'ancien JSON affiche si le calcul du nouveau chemin conventionnel echoue."""
+    from tkinter import messagebox
+
+    from chaine_editoriale import interface_publication as ip
+    from chaine_editoriale import metadata_editor_adapter
+    from chaine_editoriale.erreurs import MetadataEditorIntegrationError
+
+    docx1 = tmp_path / "livre1.docx"
+    docx1.write_bytes(b"fake")
+    metadata1 = tmp_path / "livre1.metadata.json"
+    metadata1.write_text("{}", encoding="utf-8")
+    docx2 = tmp_path / "livre2.docx"
+    docx2.write_bytes(b"fake")
+
+    def _failing_conventional(docx_path: Path) -> Path:
+        raise MetadataEditorIntegrationError("échec simulé")
+
+    monkeypatch.setattr(metadata_editor_adapter, "conventional_metadata_path", _failing_conventional)
+    monkeypatch.setattr("tkinter.filedialog.askopenfilename", lambda **kwargs: str(docx2))
+    error_calls: list[tuple] = []
+    monkeypatch.setattr(messagebox, "showerror", lambda *args, **kwargs: error_calls.append(args))
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.docx_path = str(docx1)
+    controller.form_state.metadata_path = str(metadata1)
+    controller.form_state.metadata_path_is_automatic = True
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    docx_browse_button = _find_docx_browse_button(root)
+    docx_browse_button.invoke()
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    assert entries[0].get() == str(docx2)
+    assert entries[1].get() == ""
+    assert entries[1].get() != str(metadata1)
+    assert controller.form_state.metadata_path_is_automatic is True
+    assert len(error_calls) == 1
+
+    edit_button = next(
+        button
+        for button in _widgets_by_class(root, "TButton")
+        if button.cget("text") in ("Créer les métadonnées…", "Modifier les métadonnées…")
+    )
+    assert edit_button.cget("text") == "Créer les métadonnées…"
+    assert any("à créer" in text for text in _find_label_texts(root))
+
+
+def test_browse_docx_shows_new_conventional_json_after_old_one_cleared(
+    tk_root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Symetrique du test precedent : l'effacement prealable n'empeche pas
+    l'affichage normal du nouveau chemin conventionnel en cas de succes."""
+    from chaine_editoriale import interface_publication as ip
+    from chaine_editoriale import metadata_editor_adapter
+
+    docx1 = tmp_path / "livre1.docx"
+    docx1.write_bytes(b"fake")
+    metadata1 = tmp_path / "livre1.metadata.json"
+    metadata1.write_text("{}", encoding="utf-8")
+    docx2 = tmp_path / "livre2.docx"
+    docx2.write_bytes(b"fake")
+    metadata2 = tmp_path / "livre2.metadata.json"
+
+    def _fake_conventional(docx_path: Path) -> Path:
+        return docx_path.with_name(docx_path.stem + ".metadata.json")
+
+    monkeypatch.setattr(metadata_editor_adapter, "conventional_metadata_path", _fake_conventional)
+    monkeypatch.setattr("tkinter.filedialog.askopenfilename", lambda **kwargs: str(docx2))
+
+    root = tk_root
+    for child in list(root.winfo_children()):
+        child.destroy()
+    controller = ip.PublicationScreenController()
+    controller.form_state.docx_path = str(docx1)
+    controller.form_state.metadata_path = str(metadata1)
+    controller.form_state.metadata_path_is_automatic = True
+    gui._build_publication_screen(root, controller, lambda: None)
+    root.update()
+
+    docx_browse_button = _find_docx_browse_button(root)
+    docx_browse_button.invoke()
+    root.update()
+
+    entries = _widgets_by_class(root, "TEntry")
+    assert entries[0].get() == str(docx2)
+    assert entries[1].get() == str(metadata2)
+    assert controller.form_state.metadata_path_is_automatic is True
+
+
+# ---------------------------------------------------------------------------
 # Reconstruction : le champ reste readonly (defaut 1)
 
 

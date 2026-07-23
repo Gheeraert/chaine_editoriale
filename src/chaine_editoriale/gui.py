@@ -218,9 +218,10 @@ def _build_publication_screen(
         n'est emprunte que depuis une action explicite, jamais depuis un
         simple changement de focus.
         """
+        metadata_var.set("")
+
         text = docx_value.strip()
         if not text:
-            metadata_var.set("")
             refresh_metadata_presentation()
             return
         docx_path = ip.normalized_path(docx_value)
